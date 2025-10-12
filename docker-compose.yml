@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    env_file:
+      - .env
+    ports:
+      # - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-384}
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/worker.Dockerfile
+  #   env_file:
+  #     - .env
+  #   volumes:
+  #     - ./worker:/app
+  #   restart: unless-stopped
+  #   environment:
+  #     - SUPABASE_URL=${SUPABASE_URL}
+  #     - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+  #     - DATABASE_URL=${DATABASE_URL}
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    env_file:
+      - .env
+    environment:
+      # server-side (runs inside the container): talk to backend service name
+      - BACKEND_URL_INTERNAL=http://backend:8000
+      # browser-side (runs on your host): talk to localhost (or 127.0.0.1)
+      - NEXT_PUBLIC_BACKEND_URL_BROWSER=http://127.0.0.1:8000
+      - NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL}
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      - CI=true # <- ensure also here
+    ports:
+      # - "3000:3000"
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped

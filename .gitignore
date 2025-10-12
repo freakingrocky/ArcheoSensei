@@ -1,0 +1,31 @@
+# node
+node_modules
+.pnpm-store
+/.pnp
+.pnp.*
+
+*.log
+# python
+__pycache__/
+*.pyc
+.venv
+# env
+.env
+# build
+dist
+.next
+coverage
+# docker
+**/.dockerignore
+
+# User
+frontend/node_modules/
+frontend/.pnpm-store/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+DATA
