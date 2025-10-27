@@ -1,7 +1,7 @@
 import json
 import os, httpx, time
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import spacy
 from spacy.cli import download as spacy_download
@@ -91,14 +91,18 @@ def answer_with_ctx(
     question: str,
     context: str,
     max_tokens: int = 600,
-    temperature: float | None = None,
+    directives: Optional[str] = None,
 ) -> dict:
     """
     Send the question + context to GPT-5-mini (SIG endpoint) and return a structured answer dict.
     """
+    user_content = f"QUESTION:\n{question}\n\nCONTEXT:\n{context}"
+    if directives:
+        user_content += "\n\nDIRECTIONS:\n" + directives.strip()
+
     messages = [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"QUESTION:\n{question}\n\nCONTEXT:\n{context}"},
+        {"role": "user", "content": user_content},
     ]
 
     payload: Dict[str, Any] = {
@@ -106,9 +110,6 @@ def answer_with_ctx(
         "messages": messages,
         # "max_completion_tokens": max_tokens,
     }
-    if temperature is not None:
-        payload["temperature"] = temperature
-
     t0 = time.time()
     r = _post_json_sig_gpt5(payload)
 
@@ -185,7 +186,6 @@ def fact_check_with_llm(question: str, context: str, answer: str) -> Dict[str, A
     payload = {
         "model": settings.SIG_GPT5_DEPLOYMENT,
         "messages": messages,
-        "temperature": 0.0,
     }
 
     result: Dict[str, Any] = {
@@ -291,6 +291,54 @@ def fact_check_entities(context: str, answer: str) -> Dict[str, Any]:
     }
 
 
+def _format_missing_pairs(missing: List[Tuple[str, str]], limit: int = 5) -> str:
+    if not missing:
+        return ""
+    selected = missing[:limit]
+    formatted = [f"{a} ↔ {b}" for a, b in selected]
+    if len(missing) > limit:
+        formatted.append("…")
+    return ", ".join(formatted)
+
+
+def _build_retry_directives(
+    answer: str,
+    llm_check: Dict[str, Any],
+    entity_check: Dict[str, Any],
+    threshold: float,
+) -> str:
+    lines: List[str] = []
+
+    verdict = llm_check.get("verdict", "undetermined")
+    if not llm_check.get("passed", False):
+        rationale = llm_check.get("rationale", "") or "Previous answer was not fully supported by context."
+        lines.append(
+            "The previous draft answer failed the strict fact check. "
+            f"Verdict: {verdict}. Rationale: {rationale}"
+        )
+
+    entity_score = entity_check.get("score", 0.0)
+    if entity_score < threshold:
+        missing_pairs = entity_check.get("missing_pairs", [])
+        formatted_missing = _format_missing_pairs(missing_pairs)
+        note = (
+            f"Entity relationship match score was {entity_score:.2f}, below the target {threshold:.2f}."
+        )
+        if formatted_missing:
+            note += f" Ensure the answer explicitly maintains these entity relationships: {formatted_missing}."
+        lines.append(note)
+
+    lines.append(
+        "Regenerate a new answer using only the provided CONTEXT. "
+        "Fix the issues noted above, keep entity names consistent, and do not mention this validation process."
+    )
+
+    if answer:
+        lines.append("Previous answer (for reference, do not repeat verbatim):\n" + answer[:600])
+
+    return "\n".join(lines)
+
+
 def run_fact_check_pipeline(
     question: str,
     context: str,
@@ -300,12 +348,15 @@ def run_fact_check_pipeline(
     attempts: List[Dict[str, Any]] = []
     final_llm: Dict[str, Any] | None = None
     final_answer = ""
-
-    temperatures = [0.2, 0.35, 0.5]
+    directives: Optional[str] = None
 
     for attempt_idx in range(max_attempts):
-        temp = temperatures[attempt_idx] if attempt_idx < len(temperatures) else temperatures[-1]
-        llm_result = answer_with_ctx(question, context, temperature=temp)
+        applied_directives = directives or ""
+        llm_result = answer_with_ctx(
+            question,
+            context,
+            directives=directives,
+        )
         final_llm = llm_result
         final_answer = llm_result.get("answer", "")
 
@@ -319,8 +370,8 @@ def run_fact_check_pipeline(
 
         attempt_record = {
             "attempt": attempt_idx + 1,
-            "temperature": temp,
             "needs_retry": needs_retry,
+            "directives": applied_directives,
             "ai_check": llm_check,
             "ner_check": entity_check,
             "answer_excerpt": final_answer[:200],
@@ -339,6 +390,14 @@ def run_fact_check_pipeline(
                     "attempts": attempts,
                 },
             }
+
+        if attempt_idx + 1 < max_attempts:
+            directives = _build_retry_directives(
+                final_answer,
+                llm_check,
+                entity_check,
+                threshold,
+            )
 
     return {
         "answer": final_answer,

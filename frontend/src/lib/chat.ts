@@ -2,8 +2,8 @@
 export type Hit = { tag: string; score: number; metadata: any; text: string };
 export type FactCheckAttempt = {
   attempt: number;
-  temperature: number;
   needs_retry: boolean;
+  directives: string;
   ai_check: {
     passed: boolean;
     confidence: number;

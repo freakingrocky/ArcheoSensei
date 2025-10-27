@@ -466,7 +466,7 @@ export default function ChatPage() {
       </div>
 
       {/* HUD */}
-      {phase !== "idle" && phase !== "done" && (
+      {phase !== "idle" && (
         <ProgressHUD
           progressPct={progressPct}
           line={statusLine || LOADING_LINES[loadingLineIdx]}
