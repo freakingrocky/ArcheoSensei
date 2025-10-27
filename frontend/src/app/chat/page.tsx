@@ -1,13 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { askRAG, fetchLectures, LectureItem } from "@/lib/api";
+import {
+  fetchLectures,
+  LectureItem,
+  startQueryJob,
+  fetchQueryJob,
+} from "@/lib/api";
 import {
   Chat,
   Msg,
   Hit,
+  FactCheckResult,
   loadChats,
   saveChats,
   loadActiveChatId,
@@ -20,7 +32,14 @@ import {
 } from "@/lib/chat";
 
 // ------- constants / helpers -------
-type Phase = "idle" | "sent" | "retrieving" | "llm" | "done";
+type Phase =
+  | "idle"
+  | "sent"
+  | "retrieving"
+  | "llm"
+  | "fact_ai"
+  | "fact_claims"
+  | "done";
 
 const LOADING_LINES = [
   "Good question, lemme check the lectures…",
@@ -133,16 +152,31 @@ export default function ChatPage() {
 
   // HUD
   const [phase, setPhase] = useState<Phase>("idle");
+  const [jobId, setJobId] = useState<string | null>(null);
   const [loadingLineIdx, setLoadingLineIdx] = useState(0);
+  const [statusLine, setStatusLine] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+  const [maxRetries, setMaxRetries] = useState(3);
+  const [factAiStatus, setFactAiStatus] = useState<"passed" | "failed" | null>(
+    null
+  );
+  const [factClaimsStatus, setFactClaimsStatus] = useState<
+    "passed" | "failed" | null
+  >(null);
+  const jobChatRef = useRef<string | null>(null);
   const progressPct =
     phase === "idle"
       ? 0
       : phase === "sent"
-      ? 22
+      ? 18
       : phase === "retrieving"
-      ? 55
+      ? 40
       : phase === "llm"
-      ? 86
+      ? 65
+      : phase === "fact_ai"
+      ? 82
+      : phase === "fact_claims"
+      ? 92
       : 100;
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -239,46 +273,139 @@ export default function ChatPage() {
     );
     setQ("");
     setPhase("sent");
-    const t1 = setTimeout(
-      () => setPhase((p) => (p === "sent" ? "retrieving" : p)),
-      350
-    );
-    const t2 = setTimeout(
-      () => setPhase((p) => (p === "retrieving" ? "llm" : p)),
-      1100
-    );
+    setDiag({});
+    setRetryCount(0);
+    setMaxRetries(3);
+    setStatusLine("");
+    setFactAiStatus(null);
+    setFactClaimsStatus(null);
+    let jobStarted = false;
     try {
       const opts: any = { use_global: true };
       if (selectedLecture) opts.force_lecture_key = selectedLecture;
-      const data = await askRAG(query, opts);
-
-      // keep only max 3 slides in sources
-      const limitedHits: Hit[] = (data.hits || []).slice(0, 3);
-
-      setChats((prev) =>
-        appendMessage(prev, activeChat.id, {
-          role: "assistant",
-          content: data.answer || "(no answer)",
-          hits: limitedHits,
-          diagnostics: data.diagnostics || {},
-        })
-      );
-      setDiag(data.diagnostics || {});
-      setPhase("done");
+      const { job_id } = await startQueryJob(query, opts);
+      jobChatRef.current = activeChat.id;
+      setJobId(job_id);
+      jobStarted = true;
     } catch (e: any) {
+      setStatusLine("Encountered an error while generating answer.");
       setChats((prev) =>
         appendMessage(prev, activeChat.id, {
           role: "assistant",
           content: `Error: ${e?.message ?? "unknown error"}`,
         })
       );
-      setPhase("done");
     } finally {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      setTimeout(() => setPhase("idle"), 400);
+      if (!jobStarted) {
+        setTimeout(() => {
+          setPhase("idle");
+          setStatusLine("");
+        }, 400);
+      }
     }
   };
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let handled = false;
+
+    const phaseFromJob = (jobPhase: string): Phase => {
+      switch (jobPhase) {
+        case "retrieving":
+          return "retrieving";
+        case "llm":
+          return "llm";
+        case "fact_ai":
+          return "fact_ai";
+        case "fact_claims":
+          return "fact_claims";
+        case "done":
+          return "done";
+        case "queued":
+        case "running":
+        default:
+          return "sent";
+      }
+    };
+
+    const poll = async () => {
+      try {
+        const status = await fetchQueryJob(jobId);
+        if (cancelled) return;
+        setPhase(phaseFromJob(status.phase));
+        if (typeof status.retry_count === "number") {
+          setRetryCount(status.retry_count);
+        }
+        if (typeof status.max_attempts === "number") {
+          setMaxRetries(status.max_attempts);
+        }
+        setStatusLine(status.message?.trim() || "");
+        const aiStatus =
+          status.fact_ai_status === "passed" || status.fact_ai_status === "failed"
+            ? status.fact_ai_status
+            : null;
+        const claimsStatus =
+          status.fact_claims_status === "passed" ||
+          status.fact_claims_status === "failed"
+            ? status.fact_claims_status
+            : null;
+        setFactAiStatus(aiStatus);
+        setFactClaimsStatus(claimsStatus);
+
+        if (!handled && status.status !== "running" && status.status !== "queued") {
+          handled = true;
+          const fact = status.fact_check as FactCheckResult | undefined;
+          const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
+
+          if (status.status === "failed" && !status.message) {
+            setStatusLine("AI response could not be validated after retries.");
+          }
+
+          const targetChatId = jobChatRef.current || activeChat?.id;
+          if (targetChatId) {
+            setChats((prev) =>
+              appendMessage(prev, targetChatId, {
+                role: "assistant",
+                content: status.answer || "(no answer)",
+                hits: limitedHits,
+                diagnostics: status.diagnostics || {},
+                fact_check: fact,
+              })
+            );
+          }
+          setDiag(status.diagnostics || {});
+          setPhase("done");
+          setJobId(null);
+          jobChatRef.current = null;
+          setTimeout(() => {
+            if (!cancelled) {
+              setPhase("idle");
+              setStatusLine("");
+            }
+          }, 600);
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        setStatusLine("Lost connection to validation job.");
+        setPhase("done");
+        setJobId(null);
+        jobChatRef.current = null;
+        setTimeout(() => {
+          if (!cancelled) {
+            setPhase("idle");
+          }
+        }, 600);
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 900);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [jobId, activeChat?.id, setChats]);
 
   // open source
   async function openSourceByMeta(md: any) {
@@ -412,11 +539,15 @@ export default function ChatPage() {
       </div>
 
       {/* HUD */}
-      {phase !== "idle" && phase !== "done" && (
+      {phase !== "idle" && (
         <ProgressHUD
           progressPct={progressPct}
-          line={LOADING_LINES[loadingLineIdx]}
+          line={statusLine || LOADING_LINES[loadingLineIdx]}
           phase={phase}
+          retryCount={retryCount}
+          maxRetries={maxRetries}
+          factAiStatus={factAiStatus}
+          factClaimsStatus={factClaimsStatus}
         />
       )}
 
@@ -662,6 +793,42 @@ function ChatTurn({
 
   // Max 3 sources are already enforced at insertion time; this is just another safety slice
   const hits = (msg.hits || []).slice(0, 3);
+  const factCheck = msg.fact_check;
+  const factAttempts = factCheck?.attempts ?? [];
+  const lastAttempt = factAttempts[factAttempts.length - 1];
+  const claimCheck = lastAttempt?.claims_check;
+  const aiConfidence = lastAttempt?.ai_check?.confidence;
+  const claimScore = claimCheck?.score;
+  const entailmentPct =
+    typeof claimScore === "number"
+      ? Math.round(Math.min(Math.max(claimScore, 0), 1) * 100)
+      : null;
+  const entailedClaims =
+    typeof claimCheck?.entailed === "number" ? claimCheck.entailed : null;
+  const totalClaims =
+    typeof claimCheck?.total_claims === "number"
+      ? claimCheck.total_claims
+      : null;
+  const entailmentTarget =
+    typeof claimCheck?.threshold === "number"
+      ? Math.round(Math.min(Math.max(claimCheck.threshold, 0), 1) * 100)
+      : null;
+  const failingClaim = claimCheck?.claims?.find(
+    (c) => c && c.label && c.label.toLowerCase() !== "entailment"
+  );
+  const failingLabel = failingClaim?.label
+    ? failingClaim.label.toUpperCase()
+    : "";
+  const failingSnippet = failingClaim?.claim
+    ? failingClaim.claim.slice(0, 160)
+    : "";
+  const confidencePct =
+    typeof aiConfidence === "number"
+      ? Math.round(Math.min(Math.max(aiConfidence, 0), 1) * 100)
+      : null;
+  const maxAttemptsDisplay =
+    factCheck?.max_attempts ??
+    (factAttempts.length ? factAttempts.length : factCheck ? factCheck.retry_count + 1 : 1);
 
   return (
     <div className="flex">
@@ -676,6 +843,52 @@ function ChatTurn({
           <div className="whitespace-pre-wrap">{msg.content}</div>
         ) : (
           <AssistantMarkdown content={msg.content} />
+        )}
+
+        {!isUser && factCheck && (
+          <div className="mt-3 border-t border-neutral-800 pt-2">
+            <div className="text-xs font-semibold text-neutral-300 mb-1">
+              Validation
+            </div>
+            {factCheck.status === "passed" ? (
+              <div className="text-[11px] text-green-300">
+                Passed fact checks
+                {confidencePct !== null && ` · LLM confidence ${confidencePct}%`}
+                {entailmentPct !== null && (
+                  <>
+                    {" "}· Evidence entailment {entailmentPct}%
+                    {entailedClaims !== null && totalClaims !== null &&
+                      ` (${entailedClaims}/${totalClaims} claims)`}
+                    {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="text-[11px] text-yellow-300">
+                Failed validation after {maxAttemptsDisplay} attempts.
+                {factCheck.message ? ` ${factCheck.message}` : " Answer may be unreliable."}
+              </div>
+            )}
+            {factCheck.status !== "passed" && entailmentPct !== null && (
+              <div className="text-[11px] text-neutral-400 mt-1">
+                Evidence entailment {entailmentPct}%
+                {entailedClaims !== null && totalClaims !== null &&
+                  ` (${entailedClaims}/${totalClaims} claims)`}
+                {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
+              </div>
+            )}
+            {factCheck.status === "passed" && factCheck.retry_count > 0 && (
+              <div className="text-[11px] text-neutral-400 mt-1">
+                Validated after {factCheck.retry_count}{" "}
+                {factCheck.retry_count === 1 ? "retry" : "retries"}.
+              </div>
+            )}
+            {factCheck.status !== "passed" && failingSnippet && failingLabel && (
+              <div className="text-[11px] text-red-300 mt-1">
+                Key issue: “{failingSnippet}” → {failingLabel}
+              </div>
+            )}
+          </div>
         )}
 
         {/* per-message sources (assistant only, max 3) */}
@@ -710,10 +923,18 @@ function ProgressHUD({
   progressPct,
   line,
   phase,
+  retryCount,
+  maxRetries,
+  factAiStatus,
+  factClaimsStatus,
 }: {
   progressPct: number;
   line: string;
-  phase: string;
+  phase: Phase;
+  retryCount: number;
+  maxRetries: number;
+  factAiStatus: "passed" | "failed" | null;
+  factClaimsStatus: "passed" | "failed" | null;
 }) {
   return (
     <div className="fixed inset-0 z-30 flex items-end md:items-center justify-center p-4">
@@ -727,24 +948,52 @@ function ProgressHUD({
         </div>
         <ul className="mt-4 space-y-2 text-sm">
           <Step
-            done={phase !== "idle"}
+            done={phase !== "sent" && phase !== "idle"}
             active={phase === "sent"}
             label="Request sent to server"
           />
           <Step
-            done={phase === "retrieving" || phase === "llm"}
+            done={
+              phase === "llm" ||
+              phase === "fact_ai" ||
+              phase === "fact_claims" ||
+              phase === "done"
+            }
             active={phase === "retrieving"}
             label="Finding context"
           />
           <Step
-            done={false}
+            done={
+              phase === "fact_ai" || phase === "fact_claims" || phase === "done"
+            }
             active={phase === "llm"}
             label="AI is generating answer..."
             spinner
           />
+          <Step
+            done={
+              factAiStatus === "passed" ||
+              phase === "fact_claims" ||
+              phase === "done"
+            }
+            active={phase === "fact_ai"}
+            label="Fact checking (strict LLM)"
+            spinner
+            status={factAiStatus}
+          />
+          <Step
+            done={factClaimsStatus === "passed" || phase === "done"}
+            active={phase === "fact_claims"}
+            label="Fact checking (evidence entailment)"
+            spinner
+            status={factClaimsStatus}
+          />
         </ul>
         <div className="mt-3 text-xs text-neutral-400 text-center min-h-[1.25rem]">
           {line}
+        </div>
+        <div className="mt-1 text-[11px] text-neutral-500 text-center">
+          Retry {Math.max(0, retryCount)} / {Math.max(1, maxRetries)}
         </div>
       </div>
     </div>
@@ -756,34 +1005,38 @@ function Step({
   active,
   label,
   spinner,
+  status,
 }: {
   done: boolean;
   active: boolean;
   label: string;
   spinner?: boolean;
+  status?: "passed" | "failed" | null;
 }) {
+  let icon: ReactNode;
+  if (status === "failed") {
+    icon = <CrossIcon />;
+  } else if (done || status === "passed") {
+    icon = <CheckIcon />;
+  } else if (spinner && active) {
+    icon = <Spinner />;
+  } else {
+    icon = <CircleIcon />;
+  }
+
+  const colorClass =
+    status === "failed"
+      ? "text-red-400"
+      : done || status === "passed"
+      ? "text-green-300"
+      : active
+      ? "text-neutral-200"
+      : "text-neutral-500";
+
   return (
     <li className="flex items-center gap-3">
-      <div className="w-5 h-5 flex items-center justify-center">
-        {done ? (
-          <CheckIcon />
-        ) : spinner && active ? (
-          <Spinner />
-        ) : (
-          <CircleIcon />
-        )}
-      </div>
-      <div
-        className={`${
-          done
-            ? "text-green-300"
-            : active
-            ? "text-neutral-200"
-            : "text-neutral-500"
-        }`}
-      >
-        {label}
-      </div>
+      <div className="w-5 h-5 flex items-center justify-center">{icon}</div>
+      <div className={colorClass}>{label}</div>
     </li>
   );
 }
@@ -793,6 +1046,21 @@ function CheckIcon() {
     <svg viewBox="0 0 24 24" className="w-5 h-5 text-green-400">
       <path
         d="M20 6L9 17l-5-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CrossIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="w-5 h-5 text-red-400">
+      <path
+        d="M18 6L6 18M6 6l12 12"
         stroke="currentColor"
         strokeWidth="2"
         fill="none"

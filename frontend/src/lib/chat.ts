@@ -1,10 +1,50 @@
 // frontend/src/lib/chats.ts
 export type Hit = { tag: string; score: number; metadata: any; text: string };
+export type FactCheckAttempt = {
+  attempt: number;
+  needs_retry: boolean;
+  directives: string;
+  ai_check: {
+    passed: boolean;
+    confidence: number;
+    verdict: string;
+    rationale: string;
+  };
+  claims_check: {
+    score: number;
+    entailed: number;
+    total_claims: number;
+    threshold: number;
+    passed: boolean;
+    claims: {
+      claim: string;
+      context: string;
+      context_index: number;
+      label: string;
+      entailment_probability: number;
+      neutral_probability: number;
+      contradiction_probability: number;
+    }[];
+    details?: string;
+  };
+  answer_excerpt: string;
+};
+
+export type FactCheckResult = {
+  status: "passed" | "failed";
+  retry_count: number;
+  threshold: number;
+  max_attempts: number;
+  attempts: FactCheckAttempt[];
+  message?: string;
+};
+
 export type Msg = {
   role: "user" | "assistant";
   content: string;
   hits?: Hit[];
   diagnostics?: any;
+  fact_check?: FactCheckResult;
 };
 
 export type Chat = {
