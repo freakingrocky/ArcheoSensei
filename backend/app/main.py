@@ -1,8 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import orjson
-from typing import List, Dict
 from fastapi.responses import JSONResponse
 
 from .settings import Settings, settings
@@ -12,6 +11,8 @@ from .db import conn_cursor
 from .embed import embed_texts
 from .schemas import QueryRequest, UploadLectureRequest, MemorizeRequest, QueryOptions
 from .llm import groq_get_models, run_fact_check_pipeline
+from .jobs import jobs
+
 
 app = FastAPI(title="RAG Backend", version="0.2.0")
 
@@ -63,6 +64,121 @@ def memorize(req: MemorizeRequest):
         )
     return {"ok": True}
 
+def _build_context_from_hits(hits: List[Dict[str, Any]]) -> str:
+    blocks, total = [], 0
+    for h in hits:
+        snippet = h.get("text", "").strip()
+        tag = h.get("tag", "[CTX]")
+        block = f"{tag} {snippet}"
+        if total + len(block) > 30_000:
+            break
+        blocks.append(block)
+        total += len(block)
+    return "\n\n".join(blocks) if blocks else "(no context)"
+
+
+def _process_query_job(job_id: str, req: QueryRequest) -> None:
+    opts = req.options or QueryOptions()
+    try:
+        jobs.update_job(job_id, status="running", phase="retrieving")
+        retrieval = retrieve(
+            query=req.query,
+            lecture_force=opts.force_lecture_key,
+            use_global=opts.use_global,
+            user_id=opts.user_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        jobs.update_job(
+            job_id,
+            status="failed",
+            phase="done",
+            message=f"Retrieval failed: {exc}",
+            answer=f"Error: Retrieval failed ({exc})",
+            fact_check={},
+            diagnostics={},
+            hits=[],
+        )
+        return
+
+    hits = retrieval.get("hits", [])
+    context = _build_context_from_hits(hits)
+    diagnostics = retrieval.get("diagnostics", {})
+
+    jobs.update_job(
+        job_id,
+        phase="llm",
+        diagnostics=diagnostics,
+        hits=hits,
+        top_k=len(hits),
+        context_len=len(context),
+    )
+
+    def progress(event: Dict[str, Any]) -> None:
+        stage = event.get("stage")
+        if stage == "pipeline_start":
+            jobs.update_job(
+                job_id,
+                max_attempts=event.get("max_attempts"),
+                threshold=event.get("threshold"),
+            )
+        elif stage == "attempt_start":
+            jobs.update_job(
+                job_id,
+                phase="llm",
+                current_attempt=event.get("attempt"),
+                directives=event.get("directives", ""),
+            )
+        elif stage == "llm_result":
+            jobs.update_job(job_id, llm=event.get("llm"))
+        elif stage == "fact_ai":
+            jobs.update_job(job_id, phase="fact_ai", last_ai_check=event.get("ai_check"))
+        elif stage == "fact_ner":
+            jobs.update_job(job_id, phase="fact_ner", last_ner_check=event.get("ner_check"))
+        elif stage == "attempt_complete":
+            attempt = event.get("attempt_record") or {}
+            jobs.append_attempt(job_id, attempt)
+            retry_count = max(0, int(attempt.get("attempt", 1)) - 1)
+            message = "AI response could not be validated, retrying..." if attempt.get("needs_retry") else ""
+            jobs.update_job(job_id, retry_count=retry_count, message=message)
+        elif stage == "completed":
+            status = event.get("status")
+            final_status = "succeeded" if status == "passed" else "failed"
+            message = ""
+            fact_payload = event.get("fact_check") or {}
+            if final_status == "failed":
+                message = fact_payload.get(
+                    "message",
+                    "AI response could not be validated after retries.",
+                )
+            jobs.update_job(
+                job_id,
+                status=final_status,
+                phase="done",
+                answer=event.get("answer"),
+                fact_check=fact_payload,
+                llm=event.get("llm"),
+                message=message,
+            )
+
+    result = run_fact_check_pipeline(
+        req.query,
+        context,
+        progress_cb=progress,
+    )
+
+    # Ensure final payload is stored even if the completed event didn't fire (e.g. progress callback absent)
+    existing = jobs.get_job(job_id) or {}
+    status = "succeeded" if (result.get("fact_check", {}).get("status") == "passed") else existing.get("status", "failed")
+    jobs.update_job(
+        job_id,
+        status=status,
+        phase="done",
+        answer=result.get("answer"),
+        fact_check=result.get("fact_check"),
+        llm=result.get("llm"),
+    )
+
+
 @app.post("/query")
 def query(req: QueryRequest):
     opts = req.options or QueryOptions()
@@ -72,16 +188,8 @@ def query(req: QueryRequest):
         use_global=opts.use_global,
         user_id=opts.user_id
     )
-    # Build prompt context capped to ~3–4k chars to keep costs low
-    blocks, total = [], 0
-    for h in out["hits"]:
-        snippet = h["text"].strip()
-        tag = h.get("tag","[CTX]")
-        block = f"{tag} {snippet}"
-        if total + len(block) > 30_000:  # crude cap
-            break
-        blocks.append(block); total += len(block)
-    context = "\n\n".join(blocks) if blocks else "(no context)"
+    hits = out.get("hits", [])
+    context = _build_context_from_hits(hits)
     fact_checked = run_fact_check_pipeline(req.query, context)
     llm = fact_checked.get("llm", {})
     answer = fact_checked.get("answer")
@@ -89,8 +197,8 @@ def query(req: QueryRequest):
 
     return {
         "diagnostics": out["diagnostics"],
-        "top_k": len(out["hits"]),
-        "hits": out["hits"],
+        "top_k": len(hits),
+        "hits": hits,
         "context_len": len(context),
         "llm_model": llm.get("model"),
         "llm_latency_s": llm.get("latency_s"),
@@ -98,6 +206,21 @@ def query(req: QueryRequest):
         "answer": answer,
         "fact_check": fact_check,
     }
+
+
+@app.post("/query/async")
+def query_async(req: QueryRequest, background: BackgroundTasks):
+    job_id = jobs.create_job({"status": "queued", "phase": "queued"})
+    background.add_task(_process_query_job, job_id, req)
+    return {"job_id": job_id}
+
+
+@app.get("/query/async/{job_id}")
+def query_async_status(job_id: str):
+    job = jobs.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 @app.get("/llm/models")
 def llm_models():

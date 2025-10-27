@@ -1,7 +1,7 @@
 import json
 import os, httpx, time
 import re
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Callable, Dict, List, Tuple, Optional
 
 import spacy
 from spacy.cli import download as spacy_download
@@ -344,24 +344,43 @@ def run_fact_check_pipeline(
     context: str,
     max_attempts: int = MAX_FACT_ATTEMPTS,
     threshold: float = FACT_THRESHOLD,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     attempts: List[Dict[str, Any]] = []
     final_llm: Dict[str, Any] | None = None
     final_answer = ""
     directives: Optional[str] = None
 
+    def emit(stage: str, **payload: Any) -> None:
+        if progress_cb:
+            progress_cb({"stage": stage, **payload})
+
+    emit(
+        "pipeline_start",
+        max_attempts=max_attempts,
+        threshold=threshold,
+    )
+
     for attempt_idx in range(max_attempts):
         applied_directives = directives or ""
+        emit(
+            "attempt_start",
+            attempt=attempt_idx + 1,
+            directives=applied_directives,
+        )
         llm_result = answer_with_ctx(
             question,
             context,
             directives=directives,
         )
+        emit("llm_result", attempt=attempt_idx + 1, llm=llm_result)
         final_llm = llm_result
         final_answer = llm_result.get("answer", "")
 
         llm_check = fact_check_with_llm(question, context, final_answer)
+        emit("fact_ai", attempt=attempt_idx + 1, ai_check=llm_check)
         entity_check = fact_check_entities(context, final_answer)
+        emit("fact_ner", attempt=attempt_idx + 1, ner_check=entity_check)
 
         needs_retry = (
             not llm_check.get("passed", False)
@@ -377,18 +396,27 @@ def run_fact_check_pipeline(
             "answer_excerpt": final_answer[:200],
         }
         attempts.append(attempt_record)
+        emit("attempt_complete", attempt_record=attempt_record)
 
         if not needs_retry:
+            fact_check_payload = {
+                "status": "passed",
+                "retry_count": attempt_idx,
+                "threshold": threshold,
+                "max_attempts": max_attempts,
+                "attempts": attempts,
+            }
+            emit(
+                "completed",
+                status="passed",
+                answer=final_answer,
+                llm=llm_result,
+                fact_check=fact_check_payload,
+            )
             return {
                 "answer": final_answer,
                 "llm": llm_result,
-                "fact_check": {
-                    "status": "passed",
-                    "retry_count": attempt_idx,
-                    "threshold": threshold,
-                    "max_attempts": max_attempts,
-                    "attempts": attempts,
-                },
+                "fact_check": fact_check_payload,
             }
 
         if attempt_idx + 1 < max_attempts:
@@ -399,17 +427,26 @@ def run_fact_check_pipeline(
                 threshold,
             )
 
+    fact_check_payload = {
+        "status": "failed",
+        "retry_count": max(0, len(attempts) - 1),
+        "threshold": threshold,
+        "max_attempts": max_attempts,
+        "attempts": attempts,
+        "message": "Unable to validate answer after retries.",
+    }
+    emit(
+        "completed",
+        status="failed",
+        answer=final_answer,
+        llm=final_llm or {},
+        fact_check=fact_check_payload,
+    )
+
     return {
         "answer": final_answer,
         "llm": final_llm or {},
-        "fact_check": {
-            "status": "failed",
-            "retry_count": max(0, len(attempts) - 1),
-            "threshold": threshold,
-            "max_attempts": max_attempts,
-            "attempts": attempts,
-            "message": "Unable to validate answer after retries.",
-        },
+        "fact_check": fact_check_payload,
     }
 
 

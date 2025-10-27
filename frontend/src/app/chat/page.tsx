@@ -3,7 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { askRAG, fetchLectures, LectureItem } from "@/lib/api";
+import {
+  fetchLectures,
+  LectureItem,
+  startQueryJob,
+  fetchQueryJob,
+} from "@/lib/api";
 import {
   Chat,
   Msg,
@@ -141,10 +146,12 @@ export default function ChatPage() {
 
   // HUD
   const [phase, setPhase] = useState<Phase>("idle");
+  const [jobId, setJobId] = useState<string | null>(null);
   const [loadingLineIdx, setLoadingLineIdx] = useState(0);
   const [statusLine, setStatusLine] = useState("");
   const [retryCount, setRetryCount] = useState(0);
   const [maxRetries, setMaxRetries] = useState(3);
+  const jobChatRef = useRef<string | null>(null);
   const progressPct =
     phase === "idle"
       ? 0
@@ -254,69 +261,19 @@ export default function ChatPage() {
     );
     setQ("");
     setPhase("sent");
+    setDiag({});
     setRetryCount(0);
     setMaxRetries(3);
     setStatusLine("");
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    const schedule = (fn: () => void, delay: number) => {
-      const id = setTimeout(fn, delay);
-      timers.push(id);
-    };
-    schedule(() => setPhase((p) => (p === "sent" ? "retrieving" : p)), 350);
-    schedule(() => setPhase((p) => (p === "retrieving" ? "llm" : p)), 1100);
-    schedule(() => setPhase((p) => (p === "llm" ? "fact_ai" : p)), 1900);
-    schedule(() => setPhase((p) => (p === "fact_ai" ? "fact_ner" : p)), 2600);
+    let jobStarted = false;
     try {
       const opts: any = { use_global: true };
       if (selectedLecture) opts.force_lecture_key = selectedLecture;
-      const data = await askRAG(query, opts);
-
-      // keep only max 3 slides in sources
-      const limitedHits: Hit[] = (data.hits || []).slice(0, 3);
-
-      const fact = data.fact_check as FactCheckResult | undefined;
-      if (fact) {
-        setRetryCount(fact.retry_count ?? 0);
-        setMaxRetries(fact.max_attempts ?? 3);
-        if (fact.status === "failed") {
-          setStatusLine(
-            fact.message || "AI response could not be validated after retries."
-          );
-        } else if ((fact.retry_count ?? 0) > 0) {
-          setStatusLine("AI response could not be validated, retrying...");
-        }
-      } else {
-        setRetryCount(0);
-        setMaxRetries(3);
-      }
-
-      setChats((prev) =>
-        appendMessage(prev, activeChat.id, {
-          role: "assistant",
-          content: data.answer || "(no answer)",
-          hits: limitedHits,
-          diagnostics: data.diagnostics || {},
-          fact_check: fact,
-        })
-      );
-      setDiag(data.diagnostics || {});
-      timers.forEach(clearTimeout);
-      setPhase("fact_ai");
-      await new Promise((resolve) =>
-        setTimeout(() => {
-          setPhase("fact_ner");
-          resolve(undefined);
-        }, 350)
-      );
-      await new Promise((resolve) =>
-        setTimeout(() => {
-          setPhase("done");
-          resolve(undefined);
-        }, 220)
-      );
-      
+      const { job_id } = await startQueryJob(query, opts);
+      jobChatRef.current = activeChat.id;
+      setJobId(job_id);
+      jobStarted = true;
     } catch (e: any) {
-      timers.forEach(clearTimeout);
       setStatusLine("Encountered an error while generating answer.");
       setChats((prev) =>
         appendMessage(prev, activeChat.id, {
@@ -324,15 +281,106 @@ export default function ChatPage() {
           content: `Error: ${e?.message ?? "unknown error"}`,
         })
       );
-      setPhase("done");
     } finally {
-      timers.forEach(clearTimeout);
-      setTimeout(() => {
-        setPhase("idle");
-        setStatusLine("");
-      }, 400);
+      if (!jobStarted) {
+        setTimeout(() => {
+          setPhase("idle");
+          setStatusLine("");
+        }, 400);
+      }
     }
   };
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let handled = false;
+
+    const phaseFromJob = (jobPhase: string): Phase => {
+      switch (jobPhase) {
+        case "retrieving":
+          return "retrieving";
+        case "llm":
+          return "llm";
+        case "fact_ai":
+          return "fact_ai";
+        case "fact_ner":
+          return "fact_ner";
+        case "done":
+          return "done";
+        case "queued":
+        case "running":
+        default:
+          return "sent";
+      }
+    };
+
+    const poll = async () => {
+      try {
+        const status = await fetchQueryJob(jobId);
+        if (cancelled) return;
+        setPhase(phaseFromJob(status.phase));
+        if (typeof status.retry_count === "number") {
+          setRetryCount(status.retry_count);
+        }
+        if (typeof status.max_attempts === "number") {
+          setMaxRetries(status.max_attempts);
+        }
+        setStatusLine(status.message?.trim() || "");
+
+        if (!handled && status.status !== "running" && status.status !== "queued") {
+          handled = true;
+          const fact = status.fact_check as FactCheckResult | undefined;
+          const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
+
+          if (status.status === "failed" && !status.message) {
+            setStatusLine("AI response could not be validated after retries.");
+          }
+
+          const targetChatId = jobChatRef.current || activeChat?.id;
+          if (targetChatId) {
+            setChats((prev) =>
+              appendMessage(prev, targetChatId, {
+                role: "assistant",
+                content: status.answer || "(no answer)",
+                hits: limitedHits,
+                diagnostics: status.diagnostics || {},
+                fact_check: fact,
+              })
+            );
+          }
+          setDiag(status.diagnostics || {});
+          setPhase("done");
+          setJobId(null);
+          jobChatRef.current = null;
+          setTimeout(() => {
+            if (!cancelled) {
+              setPhase("idle");
+              setStatusLine("");
+            }
+          }, 600);
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        setStatusLine("Lost connection to validation job.");
+        setPhase("done");
+        setJobId(null);
+        jobChatRef.current = null;
+        setTimeout(() => {
+          if (!cancelled) {
+            setPhase("idle");
+          }
+        }, 600);
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 900);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [jobId, activeChat?.id, setChats]);
 
   // open source
   async function openSourceByMeta(md: any) {
