@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     SIG_GPT5_BASE: str = ""   # e.g., https://api-iw.azure-api.net/sig-shared-jpeast
     SIG_API_VERSION: str = "2025-01-01-preview"
     SIG_GPT5_DEPLOYMENT: str = "gpt-5-mini"
+    HUGGINGFACE_TOKEN: str = ""
 
 
 settings = Settings()
