@@ -34,6 +34,9 @@ IF SOMETHING CANNOT BE VERIFIED THEN MAKE SURE NOT TO INCLUDE IT IN THE FINAL RE
 IF THERE IS ANY ERROR OR CONTRADICTION IN THE CONTEXT, POINT IT OUT CLEARLY.
 IF YOU ARE UNSURE ABOUT THE ANSWER, STATE THAT CLEARLY RATHER THAN GUESSING.
 Respond in a clear, concise manner suitable for a student audience.
+
+
+Respond in Markdown format.
 """
 
 _LEC_SLIDE = re.compile(r"\[LEC\s+lec_(\d+)\s*/\s*SLIDE\s+(\d+)\]", re.I)
