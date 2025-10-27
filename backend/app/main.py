@@ -11,7 +11,7 @@ from .retrieve import retrieve
 from .db import conn_cursor
 from .embed import embed_texts
 from .schemas import QueryRequest, UploadLectureRequest, MemorizeRequest, QueryOptions
-from .llm import answer_with_ctx, groq_get_models
+from .llm import groq_get_models, run_fact_check_pipeline
 
 app = FastAPI(title="RAG Backend", version="0.2.0")
 
@@ -82,7 +82,10 @@ def query(req: QueryRequest):
             break
         blocks.append(block); total += len(block)
     context = "\n\n".join(blocks) if blocks else "(no context)"
-    llm = answer_with_ctx(req.query, context)
+    fact_checked = run_fact_check_pipeline(req.query, context)
+    llm = fact_checked.get("llm", {})
+    answer = fact_checked.get("answer")
+    fact_check = fact_checked.get("fact_check", {})
 
     return {
         "diagnostics": out["diagnostics"],
@@ -92,7 +95,8 @@ def query(req: QueryRequest):
         "llm_model": llm.get("model"),
         "llm_latency_s": llm.get("latency_s"),
         "llm_usage": llm.get("usage", {}),
-        "answer": llm.get("answer"),
+        "answer": answer,
+        "fact_check": fact_check,
     }
 
 @app.get("/llm/models")

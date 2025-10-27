@@ -8,6 +8,7 @@ import {
   Chat,
   Msg,
   Hit,
+  FactCheckResult,
   loadChats,
   saveChats,
   loadActiveChatId,
@@ -20,7 +21,14 @@ import {
 } from "@/lib/chat";
 
 // ------- constants / helpers -------
-type Phase = "idle" | "sent" | "retrieving" | "llm" | "done";
+type Phase =
+  | "idle"
+  | "sent"
+  | "retrieving"
+  | "llm"
+  | "fact_ai"
+  | "fact_ner"
+  | "done";
 
 const LOADING_LINES = [
   "Good question, lemme check the lectures…",
@@ -134,15 +142,22 @@ export default function ChatPage() {
   // HUD
   const [phase, setPhase] = useState<Phase>("idle");
   const [loadingLineIdx, setLoadingLineIdx] = useState(0);
+  const [statusLine, setStatusLine] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+  const [maxRetries, setMaxRetries] = useState(3);
   const progressPct =
     phase === "idle"
       ? 0
       : phase === "sent"
-      ? 22
+      ? 18
       : phase === "retrieving"
-      ? 55
+      ? 40
       : phase === "llm"
-      ? 86
+      ? 65
+      : phase === "fact_ai"
+      ? 82
+      : phase === "fact_ner"
+      ? 92
       : 100;
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -239,14 +254,18 @@ export default function ChatPage() {
     );
     setQ("");
     setPhase("sent");
-    const t1 = setTimeout(
-      () => setPhase((p) => (p === "sent" ? "retrieving" : p)),
-      350
-    );
-    const t2 = setTimeout(
-      () => setPhase((p) => (p === "retrieving" ? "llm" : p)),
-      1100
-    );
+    setRetryCount(0);
+    setMaxRetries(3);
+    setStatusLine("");
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const schedule = (fn: () => void, delay: number) => {
+      const id = setTimeout(fn, delay);
+      timers.push(id);
+    };
+    schedule(() => setPhase((p) => (p === "sent" ? "retrieving" : p)), 350);
+    schedule(() => setPhase((p) => (p === "retrieving" ? "llm" : p)), 1100);
+    schedule(() => setPhase((p) => (p === "llm" ? "fact_ai" : p)), 1900);
+    schedule(() => setPhase((p) => (p === "fact_ai" ? "fact_ner" : p)), 2600);
     try {
       const opts: any = { use_global: true };
       if (selectedLecture) opts.force_lecture_key = selectedLecture;
@@ -255,17 +274,50 @@ export default function ChatPage() {
       // keep only max 3 slides in sources
       const limitedHits: Hit[] = (data.hits || []).slice(0, 3);
 
+      const fact = data.fact_check as FactCheckResult | undefined;
+      if (fact) {
+        setRetryCount(fact.retry_count ?? 0);
+        setMaxRetries(fact.max_attempts ?? 3);
+        if (fact.status === "failed") {
+          setStatusLine(
+            fact.message || "AI response could not be validated after retries."
+          );
+        } else if ((fact.retry_count ?? 0) > 0) {
+          setStatusLine("AI response could not be validated, retrying...");
+        }
+      } else {
+        setRetryCount(0);
+        setMaxRetries(3);
+      }
+
       setChats((prev) =>
         appendMessage(prev, activeChat.id, {
           role: "assistant",
           content: data.answer || "(no answer)",
           hits: limitedHits,
           diagnostics: data.diagnostics || {},
+          fact_check: fact,
         })
       );
       setDiag(data.diagnostics || {});
-      setPhase("done");
+      timers.forEach(clearTimeout);
+      setPhase("fact_ai");
+      await new Promise((resolve) =>
+        setTimeout(() => {
+          setPhase("fact_ner");
+          resolve(undefined);
+        }, 350)
+      );
+      await new Promise((resolve) =>
+        setTimeout(() => {
+          setPhase("done");
+          resolve(undefined);
+        }, 220)
+      );
+      
     } catch (e: any) {
+      timers.forEach(clearTimeout);
+      setStatusLine("Encountered an error while generating answer.");
       setChats((prev) =>
         appendMessage(prev, activeChat.id, {
           role: "assistant",
@@ -274,9 +326,11 @@ export default function ChatPage() {
       );
       setPhase("done");
     } finally {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      setTimeout(() => setPhase("idle"), 400);
+      timers.forEach(clearTimeout);
+      setTimeout(() => {
+        setPhase("idle");
+        setStatusLine("");
+      }, 400);
     }
   };
 
@@ -415,8 +469,10 @@ export default function ChatPage() {
       {phase !== "idle" && phase !== "done" && (
         <ProgressHUD
           progressPct={progressPct}
-          line={LOADING_LINES[loadingLineIdx]}
+          line={statusLine || LOADING_LINES[loadingLineIdx]}
           phase={phase}
+          retryCount={retryCount}
+          maxRetries={maxRetries}
         />
       )}
 
@@ -662,6 +718,20 @@ function ChatTurn({
 
   // Max 3 sources are already enforced at insertion time; this is just another safety slice
   const hits = (msg.hits || []).slice(0, 3);
+  const factCheck = msg.fact_check;
+  const factAttempts = factCheck?.attempts ?? [];
+  const lastAttempt = factAttempts[factAttempts.length - 1];
+  const entityScore = lastAttempt?.ner_check?.score;
+  const aiConfidence = lastAttempt?.ai_check?.confidence;
+  const entityPct =
+    typeof entityScore === "number" ? Math.round(entityScore * 100) : null;
+  const confidencePct =
+    typeof aiConfidence === "number"
+      ? Math.round(Math.min(Math.max(aiConfidence, 0), 1) * 100)
+      : null;
+  const maxAttemptsDisplay =
+    factCheck?.max_attempts ??
+    (factAttempts.length ? factAttempts.length : factCheck ? factCheck.retry_count + 1 : 1);
 
   return (
     <div className="flex">
@@ -676,6 +746,32 @@ function ChatTurn({
           <div className="whitespace-pre-wrap">{msg.content}</div>
         ) : (
           <AssistantMarkdown content={msg.content} />
+        )}
+
+        {!isUser && factCheck && (
+          <div className="mt-3 border-t border-neutral-800 pt-2">
+            <div className="text-xs font-semibold text-neutral-300 mb-1">
+              Validation
+            </div>
+            {factCheck.status === "passed" ? (
+              <div className="text-[11px] text-green-300">
+                Passed fact checks
+                {confidencePct !== null && ` · LLM confidence ${confidencePct}%`}
+                {entityPct !== null && ` · Entity match ${entityPct}%`}
+              </div>
+            ) : (
+              <div className="text-[11px] text-yellow-300">
+                Failed validation after {maxAttemptsDisplay} attempts.
+                {factCheck.message ? ` ${factCheck.message}` : " Answer may be unreliable."}
+              </div>
+            )}
+            {factCheck.status === "passed" && factCheck.retry_count > 0 && (
+              <div className="text-[11px] text-neutral-400 mt-1">
+                Validated after {factCheck.retry_count}{" "}
+                {factCheck.retry_count === 1 ? "retry" : "retries"}.
+              </div>
+            )}
+          </div>
         )}
 
         {/* per-message sources (assistant only, max 3) */}
@@ -710,10 +806,14 @@ function ProgressHUD({
   progressPct,
   line,
   phase,
+  retryCount,
+  maxRetries,
 }: {
   progressPct: number;
   line: string;
-  phase: string;
+  phase: Phase;
+  retryCount: number;
+  maxRetries: number;
 }) {
   return (
     <div className="fixed inset-0 z-30 flex items-end md:items-center justify-center p-4">
@@ -727,24 +827,46 @@ function ProgressHUD({
         </div>
         <ul className="mt-4 space-y-2 text-sm">
           <Step
-            done={phase !== "idle"}
+            done={phase !== "sent" && phase !== "idle"}
             active={phase === "sent"}
             label="Request sent to server"
           />
           <Step
-            done={phase === "retrieving" || phase === "llm"}
+            done={
+              phase === "llm" ||
+              phase === "fact_ai" ||
+              phase === "fact_ner" ||
+              phase === "done"
+            }
             active={phase === "retrieving"}
             label="Finding context"
           />
           <Step
-            done={false}
+            done={
+              phase === "fact_ai" || phase === "fact_ner" || phase === "done"
+            }
             active={phase === "llm"}
             label="AI is generating answer..."
+            spinner
+          />
+          <Step
+            done={phase === "fact_ner" || phase === "done"}
+            active={phase === "fact_ai"}
+            label="Fact checking (strict LLM)"
+            spinner
+          />
+          <Step
+            done={phase === "done"}
+            active={phase === "fact_ner"}
+            label="Fact checking (NER & entities)"
             spinner
           />
         </ul>
         <div className="mt-3 text-xs text-neutral-400 text-center min-h-[1.25rem]">
           {line}
+        </div>
+        <div className="mt-1 text-[11px] text-neutral-500 text-center">
+          Retry {Math.max(0, retryCount)} / {Math.max(1, maxRetries)}
         </div>
       </div>
     </div>
