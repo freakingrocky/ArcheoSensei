@@ -131,9 +131,21 @@ def _process_query_job(job_id: str, req: QueryRequest) -> None:
         elif stage == "llm_result":
             jobs.update_job(job_id, llm=event.get("llm"))
         elif stage == "fact_ai":
-            jobs.update_job(job_id, phase="fact_ai", last_ai_check=event.get("ai_check"))
-        elif stage == "fact_ner":
-            jobs.update_job(job_id, phase="fact_ner", last_ner_check=event.get("ner_check"))
+            ai_check = event.get("ai_check") or {}
+            jobs.update_job(
+                job_id,
+                phase="fact_ai",
+                last_ai_check=ai_check,
+                fact_ai_status="passed" if ai_check.get("passed") else "failed",
+            )
+        elif stage == "fact_claims":
+            claims_check = event.get("claims_check") or {}
+            jobs.update_job(
+                job_id,
+                phase="fact_claims",
+                last_claim_check=claims_check,
+                fact_claims_status="passed" if claims_check.get("passed") else "failed",
+            )
         elif stage == "attempt_complete":
             attempt = event.get("attempt_record") or {}
             jobs.append_attempt(job_id, attempt)

@@ -1,12 +1,14 @@
 import json
 import os, httpx, time
 import re
-from typing import Any, Callable, Dict, List, Tuple, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-import spacy
-from spacy.cli import download as spacy_download
+import numpy as np
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from .settings import settings
+from .embed import embed_texts
 
 BASE = os.environ.get("GROQ_API_BASE", "https://api.groq.com")
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -152,24 +154,172 @@ Respond in strict JSON format with keys: verdict (\"pass\" or \"fail\"),
 confidence (0.0-1.0), and rationale (string explaining the decision).
 Do not include any additional commentary outside of valid JSON."""
 
-_NLP = None
+_MNLI_MODEL = None
+_MNLI_TOKENIZER = None
+_MNLI_MODEL_NAME = "microsoft/deberta-v3-base-mnli"
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n", re.MULTILINE)
+_CITATION_RE = re.compile(r"\[[^\]]+\]")
 
 
-def _get_nlp():
-    global _NLP
-    if _NLP is not None:
-        return _NLP
-    try:
-        _NLP = spacy.load("en_core_web_sm")
-    except OSError:
-        try:
-            spacy_download("en_core_web_sm")
-            _NLP = spacy.load("en_core_web_sm")
-        except Exception:
-            _NLP = spacy.blank("en")
-            if "ner" not in _NLP.pipe_names:
-                _NLP.add_pipe("ner")
-    return _NLP
+def _load_mnli():
+    global _MNLI_MODEL, _MNLI_TOKENIZER
+    if _MNLI_MODEL is None or _MNLI_TOKENIZER is None:
+        _MNLI_TOKENIZER = AutoTokenizer.from_pretrained(_MNLI_MODEL_NAME)
+        _MNLI_MODEL = AutoModelForSequenceClassification.from_pretrained(
+            _MNLI_MODEL_NAME
+        )
+        _MNLI_MODEL.eval()
+    return _MNLI_MODEL, _MNLI_TOKENIZER
+
+
+def _strip_citations(text: str) -> str:
+    return _CITATION_RE.sub("", text).strip()
+
+
+def _split_sentences(text: str) -> List[str]:
+    sentences: List[str] = []
+    for block in text.splitlines():
+        block = block.strip()
+        if not block:
+            continue
+        parts = _SENTENCE_SPLIT_RE.split(block)
+        for part in parts:
+            cleaned = part.strip()
+            if cleaned:
+                sentences.append(cleaned)
+    return sentences
+
+
+def _extract_sentences(text: str, min_chars: int = 20) -> List[str]:
+    sentences = [_strip_citations(s) for s in _split_sentences(text)]
+    return [s for s in sentences if len(s) >= min_chars]
+
+
+def generate_claims(answer: str, min_chars: int = 32, min_words: int = 5) -> List[str]:
+    candidates = _extract_sentences(answer, min_chars=min_chars)
+    claims: List[str] = []
+    for cand in candidates:
+        cleaned = cand.lstrip("•*- ").strip()
+        if len(cleaned.split()) >= min_words:
+            claims.append(cleaned)
+    return claims
+
+
+def _claim_context_pairs(
+    claims: List[str], context_sentences: List[str]
+) -> List[tuple[str, str, int]]:
+    if not claims or not context_sentences:
+        return []
+
+    ctx_embeddings = embed_texts(context_sentences)
+    claim_embeddings = embed_texts(claims)
+    sims = np.matmul(claim_embeddings, ctx_embeddings.T)
+    indices = np.argmax(sims, axis=1)
+    pairs: List[tuple[str, str, int]] = []
+    for idx, claim in enumerate(claims):
+        ctx_idx = int(indices[idx])
+        pairs.append((claim, context_sentences[ctx_idx], ctx_idx))
+    return pairs
+
+
+def fact_check_claims(
+    context: str, answer: str, threshold: float
+) -> Dict[str, Any]:
+    context_sentences = _extract_sentences(context)
+    claims = generate_claims(answer)
+
+    if not claims:
+        return {
+            "score": 1.0,
+            "entailed": 0,
+            "total_claims": 0,
+            "claims": [],
+            "passed": True,
+            "details": "No substantial claims extracted from answer.",
+        }
+
+    if not context_sentences:
+        return {
+            "score": 0.0,
+            "entailed": 0,
+            "total_claims": len(claims),
+            "claims": [],
+            "passed": False,
+            "details": "No context sentences available for verification.",
+        }
+
+    model, tokenizer = _load_mnli()
+    pairs = _claim_context_pairs(claims, context_sentences)
+
+    entailments = 0
+    claim_details: List[Dict[str, Any]] = []
+
+    for claim, ctx_sentence, ctx_idx in pairs:
+        inputs = tokenizer(
+            ctx_sentence,
+            claim,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=512,
+        )
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            logits = model(**inputs).logits
+            probs = torch.softmax(logits, dim=-1)[0].cpu()
+
+        label_idx = int(torch.argmax(probs))
+        label = model.config.id2label.get(label_idx, "neutral").lower()
+        entail_prob = float(probs[2].item()) if probs.numel() >= 3 else 0.0
+        neutral_prob = float(probs[1].item()) if probs.numel() >= 2 else 0.0
+        contra_prob = float(probs[0].item()) if probs.numel() >= 1 else 0.0
+
+        if label == "entailment":
+            entailments += 1
+
+        claim_details.append(
+            {
+                "claim": claim,
+                "context": ctx_sentence,
+                "context_index": ctx_idx,
+                "label": label,
+                "entailment_probability": entail_prob,
+                "neutral_probability": neutral_prob,
+                "contradiction_probability": contra_prob,
+            }
+        )
+
+    score = entailments / max(len(claims), 1)
+    return {
+        "score": score,
+        "entailed": entailments,
+        "total_claims": len(claims),
+        "claims": claim_details,
+        "threshold": threshold,
+        "passed": score >= threshold,
+    }
+
+
+def _summarize_claim_failures(
+    claim_check: Dict[str, Any], limit: int = 4
+) -> List[str]:
+    details = []
+    for entry in claim_check.get("claims", [])[:limit]:
+        if entry.get("label") == "entailment":
+            continue
+        claim = entry.get("claim", "")
+        ctx = entry.get("context", "")
+        label = entry.get("label", "neutral").capitalize()
+        details.append(
+            f"Claim '{claim[:160]}' was rated {label}. Align it with context: '{ctx[:160]}'"
+        )
+    if not details and claim_check.get("total_claims"):
+        details.append(
+            "Some claims were not fully entailed by the context. Restate them using direct evidence."
+        )
+    return details
 
 
 def fact_check_with_llm(question: str, context: str, answer: str) -> Dict[str, Any]:
@@ -229,82 +379,10 @@ def fact_check_with_llm(question: str, context: str, answer: str) -> Dict[str, A
     return result
 
 
-def _normalize_entity(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().lower()
-
-
-def _entities_and_pairs(doc) -> Tuple[List[str], List[Tuple[str, str]]]:
-    entities = [_normalize_entity(ent.text) for ent in doc.ents if ent.text.strip()]
-    pairs: List[Tuple[str, str]] = []
-    if not entities:
-        return entities, pairs
-
-    if doc.has_annotation("SENT_START"):
-        sentences = list(doc.sents)
-    else:
-        sentences = [doc]
-
-    for sent in sentences:
-        sent_entities = [
-            _normalize_entity(ent.text)
-            for ent in sent.ents
-            if ent.text.strip()
-        ]
-        for i, ent_a in enumerate(sent_entities):
-            for ent_b in sent_entities[i + 1 :]:
-                pair = tuple(sorted((ent_a, ent_b)))
-                pairs.append(pair)
-    return entities, pairs
-
-
-def fact_check_entities(context: str, answer: str) -> Dict[str, Any]:
-    nlp = _get_nlp()
-    ctx_doc = nlp(context or "")
-    ans_doc = nlp(answer or "")
-
-    ctx_entities, ctx_pairs = _entities_and_pairs(ctx_doc)
-    ans_entities, ans_pairs = _entities_and_pairs(ans_doc)
-
-    ctx_pair_set = set(ctx_pairs)
-    ans_pair_set = set(ans_pairs)
-
-    if not ans_pair_set:
-        return {
-            "score": 1.0,
-            "matched_pairs": [],
-            "missing_pairs": [],
-            "answer_entities": ans_entities,
-            "context_entities": ctx_entities,
-            "details": "No entity relationships detected in answer.",
-        }
-
-    matched = sorted(pair for pair in ans_pair_set if pair in ctx_pair_set)
-    missing = sorted(pair for pair in ans_pair_set if pair not in ctx_pair_set)
-    score = len(matched) / max(len(ans_pair_set), 1)
-
-    return {
-        "score": score,
-        "matched_pairs": matched,
-        "missing_pairs": missing,
-        "answer_entities": sorted(set(ans_entities)),
-        "context_entities": sorted(set(ctx_entities)),
-    }
-
-
-def _format_missing_pairs(missing: List[Tuple[str, str]], limit: int = 5) -> str:
-    if not missing:
-        return ""
-    selected = missing[:limit]
-    formatted = [f"{a} ↔ {b}" for a, b in selected]
-    if len(missing) > limit:
-        formatted.append("…")
-    return ", ".join(formatted)
-
-
 def _build_retry_directives(
     answer: str,
     llm_check: Dict[str, Any],
-    entity_check: Dict[str, Any],
+    claim_check: Dict[str, Any],
     threshold: float,
 ) -> str:
     lines: List[str] = []
@@ -317,20 +395,17 @@ def _build_retry_directives(
             f"Verdict: {verdict}. Rationale: {rationale}"
         )
 
-    entity_score = entity_check.get("score", 0.0)
-    if entity_score < threshold:
-        missing_pairs = entity_check.get("missing_pairs", [])
-        formatted_missing = _format_missing_pairs(missing_pairs)
-        note = (
-            f"Entity relationship match score was {entity_score:.2f}, below the target {threshold:.2f}."
+    claim_score = claim_check.get("score", 0.0)
+    if claim_score < threshold:
+        lines.append(
+            f"Evidence entailment rate was {claim_score:.2f}, below the target {threshold:.2f}."
         )
-        if formatted_missing:
-            note += f" Ensure the answer explicitly maintains these entity relationships: {formatted_missing}."
-        lines.append(note)
+        for detail in _summarize_claim_failures(claim_check):
+            lines.append(detail)
 
     lines.append(
         "Regenerate a new answer using only the provided CONTEXT. "
-        "Fix the issues noted above, keep entity names consistent, and do not mention this validation process."
+        "Fix the issues noted above, keep claims grounded in the cited context, and do not mention this validation process."
     )
 
     if answer:
@@ -379,12 +454,12 @@ def run_fact_check_pipeline(
 
         llm_check = fact_check_with_llm(question, context, final_answer)
         emit("fact_ai", attempt=attempt_idx + 1, ai_check=llm_check)
-        entity_check = fact_check_entities(context, final_answer)
-        emit("fact_ner", attempt=attempt_idx + 1, ner_check=entity_check)
+        claim_check = fact_check_claims(context, final_answer, threshold)
+        emit("fact_claims", attempt=attempt_idx + 1, claims_check=claim_check)
 
         needs_retry = (
             not llm_check.get("passed", False)
-            or entity_check.get("score", 0.0) < threshold
+            or not claim_check.get("passed", False)
         )
 
         attempt_record = {
@@ -392,7 +467,7 @@ def run_fact_check_pipeline(
             "needs_retry": needs_retry,
             "directives": applied_directives,
             "ai_check": llm_check,
-            "ner_check": entity_check,
+            "claims_check": claim_check,
             "answer_excerpt": final_answer[:200],
         }
         attempts.append(attempt_record)
@@ -423,7 +498,7 @@ def run_fact_check_pipeline(
             directives = _build_retry_directives(
                 final_answer,
                 llm_check,
-                entity_check,
+                claim_check,
                 threshold,
             )
 

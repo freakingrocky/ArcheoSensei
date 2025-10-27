@@ -40,6 +40,8 @@ export type QueryJobStatus = {
   answer?: string;
   fact_check?: any;
   llm?: any;
+  fact_ai_status?: "passed" | "failed";
+  fact_claims_status?: "passed" | "failed";
 };
 
 export async function fetchQueryJob(jobId: string): Promise<QueryJobStatus> {

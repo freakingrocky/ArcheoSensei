@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -32,7 +38,7 @@ type Phase =
   | "retrieving"
   | "llm"
   | "fact_ai"
-  | "fact_ner"
+  | "fact_claims"
   | "done";
 
 const LOADING_LINES = [
@@ -151,6 +157,12 @@ export default function ChatPage() {
   const [statusLine, setStatusLine] = useState("");
   const [retryCount, setRetryCount] = useState(0);
   const [maxRetries, setMaxRetries] = useState(3);
+  const [factAiStatus, setFactAiStatus] = useState<"passed" | "failed" | null>(
+    null
+  );
+  const [factClaimsStatus, setFactClaimsStatus] = useState<
+    "passed" | "failed" | null
+  >(null);
   const jobChatRef = useRef<string | null>(null);
   const progressPct =
     phase === "idle"
@@ -163,7 +175,7 @@ export default function ChatPage() {
       ? 65
       : phase === "fact_ai"
       ? 82
-      : phase === "fact_ner"
+      : phase === "fact_claims"
       ? 92
       : 100;
 
@@ -265,6 +277,8 @@ export default function ChatPage() {
     setRetryCount(0);
     setMaxRetries(3);
     setStatusLine("");
+    setFactAiStatus(null);
+    setFactClaimsStatus(null);
     let jobStarted = false;
     try {
       const opts: any = { use_global: true };
@@ -304,8 +318,8 @@ export default function ChatPage() {
           return "llm";
         case "fact_ai":
           return "fact_ai";
-        case "fact_ner":
-          return "fact_ner";
+        case "fact_claims":
+          return "fact_claims";
         case "done":
           return "done";
         case "queued":
@@ -327,6 +341,17 @@ export default function ChatPage() {
           setMaxRetries(status.max_attempts);
         }
         setStatusLine(status.message?.trim() || "");
+        const aiStatus =
+          status.fact_ai_status === "passed" || status.fact_ai_status === "failed"
+            ? status.fact_ai_status
+            : null;
+        const claimsStatus =
+          status.fact_claims_status === "passed" ||
+          status.fact_claims_status === "failed"
+            ? status.fact_claims_status
+            : null;
+        setFactAiStatus(aiStatus);
+        setFactClaimsStatus(claimsStatus);
 
         if (!handled && status.status !== "running" && status.status !== "queued") {
           handled = true;
@@ -521,6 +546,8 @@ export default function ChatPage() {
           phase={phase}
           retryCount={retryCount}
           maxRetries={maxRetries}
+          factAiStatus={factAiStatus}
+          factClaimsStatus={factClaimsStatus}
         />
       )}
 
@@ -769,10 +796,32 @@ function ChatTurn({
   const factCheck = msg.fact_check;
   const factAttempts = factCheck?.attempts ?? [];
   const lastAttempt = factAttempts[factAttempts.length - 1];
-  const entityScore = lastAttempt?.ner_check?.score;
+  const claimCheck = lastAttempt?.claims_check;
   const aiConfidence = lastAttempt?.ai_check?.confidence;
-  const entityPct =
-    typeof entityScore === "number" ? Math.round(entityScore * 100) : null;
+  const claimScore = claimCheck?.score;
+  const entailmentPct =
+    typeof claimScore === "number"
+      ? Math.round(Math.min(Math.max(claimScore, 0), 1) * 100)
+      : null;
+  const entailedClaims =
+    typeof claimCheck?.entailed === "number" ? claimCheck.entailed : null;
+  const totalClaims =
+    typeof claimCheck?.total_claims === "number"
+      ? claimCheck.total_claims
+      : null;
+  const entailmentTarget =
+    typeof claimCheck?.threshold === "number"
+      ? Math.round(Math.min(Math.max(claimCheck.threshold, 0), 1) * 100)
+      : null;
+  const failingClaim = claimCheck?.claims?.find(
+    (c) => c && c.label && c.label.toLowerCase() !== "entailment"
+  );
+  const failingLabel = failingClaim?.label
+    ? failingClaim.label.toUpperCase()
+    : "";
+  const failingSnippet = failingClaim?.claim
+    ? failingClaim.claim.slice(0, 160)
+    : "";
   const confidencePct =
     typeof aiConfidence === "number"
       ? Math.round(Math.min(Math.max(aiConfidence, 0), 1) * 100)
@@ -805,7 +854,14 @@ function ChatTurn({
               <div className="text-[11px] text-green-300">
                 Passed fact checks
                 {confidencePct !== null && ` · LLM confidence ${confidencePct}%`}
-                {entityPct !== null && ` · Entity match ${entityPct}%`}
+                {entailmentPct !== null && (
+                  <>
+                    {" "}· Evidence entailment {entailmentPct}%
+                    {entailedClaims !== null && totalClaims !== null &&
+                      ` (${entailedClaims}/${totalClaims} claims)`}
+                    {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
+                  </>
+                )}
               </div>
             ) : (
               <div className="text-[11px] text-yellow-300">
@@ -813,10 +869,23 @@ function ChatTurn({
                 {factCheck.message ? ` ${factCheck.message}` : " Answer may be unreliable."}
               </div>
             )}
+            {factCheck.status !== "passed" && entailmentPct !== null && (
+              <div className="text-[11px] text-neutral-400 mt-1">
+                Evidence entailment {entailmentPct}%
+                {entailedClaims !== null && totalClaims !== null &&
+                  ` (${entailedClaims}/${totalClaims} claims)`}
+                {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
+              </div>
+            )}
             {factCheck.status === "passed" && factCheck.retry_count > 0 && (
               <div className="text-[11px] text-neutral-400 mt-1">
                 Validated after {factCheck.retry_count}{" "}
                 {factCheck.retry_count === 1 ? "retry" : "retries"}.
+              </div>
+            )}
+            {factCheck.status !== "passed" && failingSnippet && failingLabel && (
+              <div className="text-[11px] text-red-300 mt-1">
+                Key issue: “{failingSnippet}” → {failingLabel}
               </div>
             )}
           </div>
@@ -856,12 +925,16 @@ function ProgressHUD({
   phase,
   retryCount,
   maxRetries,
+  factAiStatus,
+  factClaimsStatus,
 }: {
   progressPct: number;
   line: string;
   phase: Phase;
   retryCount: number;
   maxRetries: number;
+  factAiStatus: "passed" | "failed" | null;
+  factClaimsStatus: "passed" | "failed" | null;
 }) {
   return (
     <div className="fixed inset-0 z-30 flex items-end md:items-center justify-center p-4">
@@ -883,7 +956,7 @@ function ProgressHUD({
             done={
               phase === "llm" ||
               phase === "fact_ai" ||
-              phase === "fact_ner" ||
+              phase === "fact_claims" ||
               phase === "done"
             }
             active={phase === "retrieving"}
@@ -891,23 +964,29 @@ function ProgressHUD({
           />
           <Step
             done={
-              phase === "fact_ai" || phase === "fact_ner" || phase === "done"
+              phase === "fact_ai" || phase === "fact_claims" || phase === "done"
             }
             active={phase === "llm"}
             label="AI is generating answer..."
             spinner
           />
           <Step
-            done={phase === "fact_ner" || phase === "done"}
+            done={
+              factAiStatus === "passed" ||
+              phase === "fact_claims" ||
+              phase === "done"
+            }
             active={phase === "fact_ai"}
             label="Fact checking (strict LLM)"
             spinner
+            status={factAiStatus}
           />
           <Step
-            done={phase === "done"}
-            active={phase === "fact_ner"}
-            label="Fact checking (NER & entities)"
+            done={factClaimsStatus === "passed" || phase === "done"}
+            active={phase === "fact_claims"}
+            label="Fact checking (evidence entailment)"
             spinner
+            status={factClaimsStatus}
           />
         </ul>
         <div className="mt-3 text-xs text-neutral-400 text-center min-h-[1.25rem]">
@@ -926,34 +1005,38 @@ function Step({
   active,
   label,
   spinner,
+  status,
 }: {
   done: boolean;
   active: boolean;
   label: string;
   spinner?: boolean;
+  status?: "passed" | "failed" | null;
 }) {
+  let icon: ReactNode;
+  if (status === "failed") {
+    icon = <CrossIcon />;
+  } else if (done || status === "passed") {
+    icon = <CheckIcon />;
+  } else if (spinner && active) {
+    icon = <Spinner />;
+  } else {
+    icon = <CircleIcon />;
+  }
+
+  const colorClass =
+    status === "failed"
+      ? "text-red-400"
+      : done || status === "passed"
+      ? "text-green-300"
+      : active
+      ? "text-neutral-200"
+      : "text-neutral-500";
+
   return (
     <li className="flex items-center gap-3">
-      <div className="w-5 h-5 flex items-center justify-center">
-        {done ? (
-          <CheckIcon />
-        ) : spinner && active ? (
-          <Spinner />
-        ) : (
-          <CircleIcon />
-        )}
-      </div>
-      <div
-        className={`${
-          done
-            ? "text-green-300"
-            : active
-            ? "text-neutral-200"
-            : "text-neutral-500"
-        }`}
-      >
-        {label}
-      </div>
+      <div className="w-5 h-5 flex items-center justify-center">{icon}</div>
+      <div className={colorClass}>{label}</div>
     </li>
   );
 }
@@ -963,6 +1046,21 @@ function CheckIcon() {
     <svg viewBox="0 0 24 24" className="w-5 h-5 text-green-400">
       <path
         d="M20 6L9 17l-5-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CrossIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="w-5 h-5 text-red-400">
+      <path
+        d="M18 6L6 18M6 6l12 12"
         stroke="currentColor"
         strokeWidth="2"
         fill="none"

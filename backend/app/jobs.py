@@ -31,6 +31,8 @@ class QueryJobManager:
             "created_at": now,
             "updated_at": now,
             "attempts": [],
+            "fact_ai_status": None,
+            "fact_claims_status": None,
         }
         if initial:
             payload.update(initial)

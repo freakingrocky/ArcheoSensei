@@ -10,12 +10,22 @@ export type FactCheckAttempt = {
     verdict: string;
     rationale: string;
   };
-  ner_check: {
+  claims_check: {
     score: number;
-    matched_pairs: string[][];
-    missing_pairs: string[][];
-    answer_entities: string[];
-    context_entities: string[];
+    entailed: number;
+    total_claims: number;
+    threshold: number;
+    passed: boolean;
+    claims: {
+      claim: string;
+      context: string;
+      context_index: number;
+      label: string;
+      entailment_probability: number;
+      neutral_probability: number;
+      contradiction_probability: number;
+    }[];
+    details?: string;
   };
   answer_excerpt: string;
 };
