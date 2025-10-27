@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = "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"
     BACKEND_PORT: int = 8000
     EMBEDDING_DIM: int = 384
+    SIG_NAME: str = ""
+    SIG_API_KEY: str = ""
+    SIG_GPT5_BASE: str = ""   # e.g., https://api-iw.azure-api.net/sig-shared-jpeast
+    SIG_API_VERSION: str = "2025-01-01-preview"
+    SIG_GPT5_DEPLOYMENT: str = "gpt-5-mini"
 
 
 settings = Settings()

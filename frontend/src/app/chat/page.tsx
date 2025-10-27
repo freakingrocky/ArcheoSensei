@@ -47,6 +47,10 @@ function labelFromMeta(md: any) {
     const n = (md.lecture_key as string).split("_").pop();
     return `Lecture ${n} Notes`;
   }
+  if (md.source === "readings" && md.lecture_key) {
+    const n = (md.lecture_key as string).split("_").pop();
+    return `From Lecture ${n}`;
+  }
   if (md.store === "global") return "Global";
   return md.source === "user_note" ? "User" : "";
 }
@@ -56,6 +60,45 @@ function toCiteLinks(text: string) {
   return text.replace(
     /\[Lecture\s+(\d+)\s+Slide\s+(\d+)\]/g,
     (_m, n, s) => `[Lecture ${n} Slide ${s}](cite:lec_${n}:${s})`
+  );
+}
+
+function LectureRef({
+  lecture,
+  preview,
+}: {
+  lecture: number;
+  preview: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        title={`From Lecture ${lecture}: ${preview.slice(0, 120)}${
+          preview.length > 120 ? "..." : ""
+        }`}
+        className="inline-flex items-center justify-center w-5 h-5 text-[10px] font-semibold rounded-full bg-indigo-500/90 text-white ml-1 hover:bg-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-300"
+      >
+        L{lecture}
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-neutral-900 text-neutral-100 rounded-xl p-6 shadow-lg text-center max-w-xs">
+            <div className="text-sm mb-3 font-semibold">Lecture {lecture}</div>
+            <p className="text-neutral-400 mb-4">Under Construction...</p>
+            <button
+              onClick={() => setOpen(false)}
+              className="rounded-lg bg-indigo-500 text-white px-3 py-1 text-sm font-medium hover:bg-indigo-400"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -571,6 +614,20 @@ function ChatTurn({
                 </a>
               );
             },
+            text: ({ node, children }) => {
+              // detect patterns like "[From Lecture 7]" or "[Lecture 3 Slide 2]"
+              const textStr = String(children);
+              const match = textStr.match(/\[From Lecture (\d+)\]/i);
+              if (match) {
+                const lectureNum = parseInt(match[1]);
+                const previewText = msg.content.slice(0, 200); // basic context preview
+                return (
+                  <LectureRef lecture={lectureNum} preview={previewText} />
+                );
+              }
+              return <>{children}</>;
+            },
+
             code: ({ inline, className, children, ...props }) =>
               !inline ? (
                 <pre className="bg-neutral-950 border border-neutral-800 rounded-lg p-3 overflow-auto">
@@ -682,7 +739,7 @@ function ProgressHUD({
           <Step
             done={false}
             active={phase === "llm"}
-            label="Request sent to Groq US servers"
+            label="AI is generating answer..."
             spinner
           />
         </ul>

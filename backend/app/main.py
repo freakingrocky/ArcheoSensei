@@ -10,7 +10,7 @@ from .ingest import ingest_files
 from .retrieve import retrieve
 from .db import conn_cursor
 from .embed import embed_texts
-from .schemas import QueryRequest, UploadLectureRequest, MemorizeRequest
+from .schemas import QueryRequest, UploadLectureRequest, MemorizeRequest, QueryOptions
 from .llm import answer_with_ctx, groq_get_models
 
 app = FastAPI(title="RAG Backend", version="0.2.0")
@@ -78,7 +78,7 @@ def query(req: QueryRequest):
         snippet = h["text"].strip()
         tag = h.get("tag","[CTX]")
         block = f"{tag} {snippet}"
-        if total + len(block) > 3600:  # crude cap
+        if total + len(block) > 30_000:  # crude cap
             break
         blocks.append(block); total += len(block)
     context = "\n\n".join(blocks) if blocks else "(no context)"

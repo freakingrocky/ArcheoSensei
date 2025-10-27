@@ -50,7 +50,7 @@ def detect_lecture(candidates: List[Dict]) -> Tuple[Optional[str], Dict[str, flo
     for r in candidates:
         md = r["metadata"]
         key = md.get("lecture_key")
-        if not key: 
+        if not key:
             continue
         # small source weights: slide > slide_note > lecture_note
         src = (md.get("source") or "")
@@ -100,13 +100,15 @@ def retrieve(query: str, lecture_force: Optional[str], use_global=True, user_id:
 
     # merge (prioritize lecture → global → user)
     merged = []
+    md = {}
     tag = lambda md: (
         f"[LEC {md.get('lecture_key')} / SLIDE {md.get('slide_no')}]" if md.get("slide_no") is not None
         else (f"[LEC {md.get('lecture_key')} / LECTURE NOTE]" if md.get("source") == "lecture_note"
               else "[GLOBAL]" if md.get("store") == "global" else "[USER]")
     )
-    for r in hits:       merged.append({**r, "tag": tag(r["metadata"])})
-    for r in global_hits: 
+    for r in hits:
+        merged.append({**r, "tag": tag(r["metadata"])})
+    for r in global_hits:
         md = dict(r["metadata"]); md["store"]="global"; r["metadata"]=md
         merged.append({**r, "tag": tag(md)})
     for r in user_hits:  merged.append({**r, "tag": "[USER]"})
@@ -124,6 +126,10 @@ def _readable_label(md):
     if md.get("source") == "lecture_note" and md.get("lecture_key"):
         n = md["lecture_key"].split("_")[-1]
         return f"Lecture {n} Notes"
+    if md.get("source") == "readings" and md.get("lecture_key"):
+        n = md["lecture_key"].split("_")[-1]
+        return f"From Lecture {n}"
+
     if md.get("store") == "global":
         return "Global"
     return "User"
