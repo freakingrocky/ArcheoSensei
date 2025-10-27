@@ -69,7 +69,10 @@ def _build_context_from_hits(hits: List[Dict[str, Any]]) -> str:
     for h in hits:
         snippet = h.get("text", "").strip()
         tag = h.get("tag", "[CTX]")
-        block = f"{tag} {snippet}"
+        md = h.get("metadata") or {}
+        filename = md.get("filename")
+        file_hint = f" [FILE {filename}]" if filename else ""
+        block = f"{tag}{file_hint}\n{snippet}" if snippet else f"{tag}{file_hint}"
         if total + len(block) > 30_000:
             break
         blocks.append(block)
