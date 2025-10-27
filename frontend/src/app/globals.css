@@ -24,3 +24,44 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.claim-chip {
+  position: relative;
+  border-bottom: 2px dotted currentColor;
+  cursor: help;
+}
+
+.claim-chip--verified {
+  color: inherit;
+  border-color: #34d399;
+}
+
+.claim-chip--unverified {
+  color: inherit;
+  border-color: #f87171;
+}
+
+.claim-chip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  transform: translateY(-0.35rem);
+  background: rgba(23, 23, 23, 0.95);
+  color: #f5f5f5;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  white-space: pre-wrap;
+  max-width: min(320px, 80vw);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+}
+
+.claim-chip:hover::after,
+.claim-chip:focus-visible::after {
+  opacity: 1;
+}

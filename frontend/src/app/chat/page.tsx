@@ -9,6 +9,7 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { visit } from "unist-util-visit";
 import {
   fetchLectures,
   LectureItem,
@@ -80,6 +81,94 @@ function toCiteLinks(text: string) {
     /\[Lecture\s+(\d+)\s+Slide\s+(\d+)\]/g,
     (_m, n, s) => `[Lecture ${n} Slide ${s}](cite:lec_${n}:${s})`
   );
+}
+
+type ClaimCheckEntry = {
+  claim: string;
+  context?: string;
+  context_index?: number;
+  label?: string;
+};
+
+function createClaimHighlighter(claims: ClaimCheckEntry[]) {
+  const entries = claims
+    .filter((c) => c?.claim)
+    .map((c) => ({
+      ...c,
+      claim: c.claim.trim(),
+      label: c.label?.toLowerCase(),
+    }))
+    .filter((c) => c.claim.length > 0);
+
+  if (!entries.length) {
+    return null;
+  }
+
+  const sorted = [...entries].sort((a, b) => b.claim.length - a.claim.length);
+
+  return () => {
+    return (tree: any) => {
+      visit(tree, "text", (node: any, index: number, parent: any) => {
+        if (!parent || typeof node.value !== "string") return;
+        if (parent.type === "code" || parent.type === "inlineCode") return;
+        let segments = [{ text: node.value, claim: null as ClaimCheckEntry | null }];
+
+        for (const entry of sorted) {
+          const nextSegments: typeof segments = [];
+          for (const seg of segments) {
+            if (seg.claim || !seg.text) {
+              nextSegments.push(seg);
+              continue;
+            }
+            const needle = entry.claim;
+            let remaining = seg.text;
+            while (remaining) {
+              const idx = remaining.indexOf(needle);
+              if (idx === -1) {
+                nextSegments.push({ text: remaining, claim: null });
+                break;
+              }
+              const before = remaining.slice(0, idx);
+              if (before) {
+                nextSegments.push({ text: before, claim: null });
+              }
+              nextSegments.push({ text: needle, claim: entry });
+              remaining = remaining.slice(idx + needle.length);
+            }
+          }
+          segments = nextSegments;
+        }
+
+        if (segments.length === 1 && segments[0].claim === null) {
+          return;
+        }
+
+        const newNodes = segments.map((seg) => {
+          if (!seg.claim) {
+            return { type: "text", value: seg.text };
+          }
+          const verified = seg.claim.label === "entailment";
+          return {
+            type: "claimHighlight",
+            data: {
+              hName: "span",
+              hProperties: {
+                className: `claim-chip ${
+                  verified ? "claim-chip--verified" : "claim-chip--unverified"
+                }`,
+                tabIndex: 0,
+                "data-tooltip": seg.claim.context || "",
+              },
+            },
+            children: [{ type: "text", value: seg.text }],
+          };
+        });
+
+        parent.children.splice(index, 1, ...newNodes);
+        return index + newNodes.length;
+      });
+    };
+  };
 }
 
 function LectureRef({
@@ -163,6 +252,10 @@ export default function ChatPage() {
   const [factClaimsStatus, setFactClaimsStatus] = useState<
     "passed" | "failed" | null
   >(null);
+  const [validationModal, setValidationModal] = useState<{
+    hits: Hit[];
+    details?: string;
+  } | null>(null);
   const jobChatRef = useRef<string | null>(null);
   const progressPct =
     phase === "idle"
@@ -279,6 +372,7 @@ export default function ChatPage() {
     setStatusLine("");
     setFactAiStatus(null);
     setFactClaimsStatus(null);
+    setValidationModal(null);
     let jobStarted = false;
     try {
       const opts: any = { use_global: true };
@@ -360,6 +454,18 @@ export default function ChatPage() {
 
           if (status.status === "failed" && !status.message) {
             setStatusLine("AI response could not be validated after retries.");
+          }
+
+          const jobFailed =
+            status.status === "failed" || (fact?.status || "") === "failed";
+          if (jobFailed) {
+            setValidationModal({
+              hits: limitedHits,
+              details:
+                status.message?.trim() ||
+                fact?.message?.trim() ||
+                "AI response could not be validated after retries.",
+            });
           }
 
           const targetChatId = jobChatRef.current || activeChat?.id;
@@ -539,7 +645,7 @@ export default function ChatPage() {
       </div>
 
       {/* HUD */}
-      {phase !== "idle" && (
+      {phase !== "idle" && phase !== "done" && (
         <ProgressHUD
           progressPct={progressPct}
           line={statusLine || LOADING_LINES[loadingLineIdx]}
@@ -548,6 +654,14 @@ export default function ChatPage() {
           maxRetries={maxRetries}
           factAiStatus={factAiStatus}
           factClaimsStatus={factClaimsStatus}
+        />
+      )}
+
+      {validationModal && (
+        <ValidationWarningModal
+          hits={validationModal.hits}
+          details={validationModal.details}
+          onClose={() => setValidationModal(null)}
         />
       )}
 
@@ -619,6 +733,70 @@ export default function ChatPage() {
 }
 
 /* ---------- Presentational subcomponents ---------- */
+
+function ValidationWarningModal({
+  hits,
+  details,
+  onClose,
+}: {
+  hits: Hit[];
+  details?: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        onClick={onClose}
+        aria-label="Close validation warning"
+      />
+      <div className="relative max-w-lg w-full rounded-2xl border border-red-500/40 bg-neutral-950/95 p-6 shadow-2xl">
+        <div className="text-sm font-semibold uppercase tracking-wide text-red-300">
+          PLEASE NOTE THAT THIS RESPONSE COULD NOT BE VERIFIED, PLEASE ENSURE TO
+          VALIDATE YOURSELF.
+        </div>
+        {details && (
+          <p className="mt-3 text-sm text-neutral-300 whitespace-pre-wrap">
+            {details}
+          </p>
+        )}
+        <div className="mt-4 text-xs font-semibold text-neutral-400">
+          SOURCES USED:
+        </div>
+        <ul className="mt-2 space-y-2 text-sm text-neutral-200">
+          {hits.length ? (
+            hits.map((h, idx) => {
+              const label = labelFromMeta(h.metadata) || h.tag;
+              const filename = h.metadata?.filename;
+              return (
+                <li key={idx} className="border border-neutral-800 rounded-lg p-2">
+                  <div className="font-medium text-neutral-100">{label}</div>
+                  {filename && (
+                    <div className="text-xs text-neutral-400">File: {filename}</div>
+                  )}
+                  <div className="text-xs text-neutral-400 line-clamp-3 mt-1">
+                    {h.text}
+                  </div>
+                </li>
+              );
+            })
+          ) : (
+            <li className="text-neutral-400 text-sm">No supporting sources.</li>
+          )}
+        </ul>
+        <div className="mt-5 flex justify-end">
+          <button
+            onClick={onClose}
+            className="text-sm font-semibold text-neutral-200 hover:text-white"
+          >
+            &lt;Click to Close&gt;
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function EmptyState() {
   return (
@@ -711,12 +889,29 @@ function ChatTurn({
 }) {
   const isUser = msg.role === "user";
 
-  const AssistantMarkdown = ({ content }: { content: string }) => {
+  const AssistantMarkdown = ({
+    content,
+    claimCheck,
+  }: {
+    content: string;
+    claimCheck?: { claims?: ClaimCheckEntry[] } | null;
+  }) => {
     const rewritten = toCiteLinks(content);
+    const highlightPlugin = useMemo(
+      () => createClaimHighlighter(claimCheck?.claims ?? []),
+      [claimCheck?.claims]
+    );
+    const remarkPlugins = useMemo(() => {
+      const base: any[] = [remarkGfm];
+      if (highlightPlugin) {
+        base.push(highlightPlugin);
+      }
+      return base;
+    }, [highlightPlugin]);
     return (
       <div className="prose prose-invert max-w-none prose-p:my-2 prose-li:my-1">
         <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={remarkPlugins}
           components={{
             a: ({ href, children, ...props }) => {
               if (href?.startsWith("cite:")) {
@@ -842,7 +1037,7 @@ function ChatTurn({
         {isUser ? (
           <div className="whitespace-pre-wrap">{msg.content}</div>
         ) : (
-          <AssistantMarkdown content={msg.content} />
+          <AssistantMarkdown content={msg.content} claimCheck={claimCheck} />
         )}
 
         {!isUser && factCheck && (
