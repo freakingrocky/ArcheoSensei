@@ -588,23 +588,10 @@ Respond in strict JSON format with keys: verdict (\"pass\" or \"fail\"),
 confidence (0.0-1.0), and rationale (string explaining the decision).
 Do not include any additional commentary outside of valid JSON."""
 
-_MNLI_MODEL = None
-_MNLI_TOKENIZER = None
-_MNLI_MODEL_NAME = "microsoft/deberta-v3-base-mnli"
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n", re.MULTILINE)
 _CITATION_RE = re.compile(r"\[[^\]]+\]")
 
-
-def _load_mnli():
-    global _MNLI_MODEL, _MNLI_TOKENIZER
-    if _MNLI_MODEL is None or _MNLI_TOKENIZER is None:
-        _MNLI_TOKENIZER = AutoTokenizer.from_pretrained(_MNLI_MODEL_NAME, token=settings.HUGGINGFACE_TOKEN or None)
-        _MNLI_MODEL = AutoModelForSequenceClassification.from_pretrained(
-            _MNLI_MODEL_NAME, token=settings.HUGGINGFACE_TOKEN or None
-        )
-        _MNLI_MODEL.eval()
-    return _MNLI_MODEL, _MNLI_TOKENIZER
 
 
 def _strip_citations(text: str) -> str:
