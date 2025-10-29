@@ -1,48 +1,88 @@
-import json
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from .db import conn_cursor
 from .embed import embed_texts
 
 def knn(limit: int, qvec: np.ndarray, where_sql: str, params: tuple):
     sql = f"""
-    select id, text, metadata, 1 - (embedding <=> %s) as score
-    from chunks
+    select c.id, c.text, c.metadata,
+           1 - (c.embedding <=> %s::vector) as score,
+           d."Citation", d."FILE_URL"
+    from chunks c
+    left join documents d on d.id = c.doc_id
     where {where_sql}
-    order by embedding <=> %s
+    order by c.embedding <=> %s::vector
     limit {limit}
     """
     with conn_cursor() as cur:
-        cur.execute(sql, (qvec.tolist(), qvec.tolist(), *params) if False else (qvec.tolist(), qvec.tolist()))
-        # note: psycopg may not accept extra params without placeholders; keep simple 2-param form
+        cur.execute(sql, (qvec.tolist(), qvec.tolist(), *params))
         rows = cur.fetchall()
-    # rows: (id, text, metadata, score)
-    return [{"id": r[0], "text": r[1], "metadata": r[2], "score": float(r[3])} for r in rows]
+    return [
+        {
+            "id": r[0],
+            "text": r[1],
+            "metadata": r[2],
+            "score": float(r[3]),
+            "citation": r[4],
+            "file_url": r[5],
+        }
+        for r in rows
+    ]
 
 def knn_store(store_kind: int, qvec: np.ndarray, limit=60):
     with conn_cursor() as cur:
         cur.execute(
-            f"""select id, text, metadata, 1 - (embedding <=> %s::vector) as score
-                from chunks
-                where store_kind = %s
-                order by embedding <=> %s::vector
-                limit {limit}""",
-            (qvec.tolist(), store_kind, qvec.tolist()),
+            """
+            select c.id, c.text, c.metadata,
+                   1 - (c.embedding <=> %s::vector) as score,
+                   d."Citation", d."FILE_URL"
+            from chunks c
+            left join documents d on d.id = c.doc_id
+            where c.store_kind = %s
+            order by c.embedding <=> %s::vector
+            limit %s
+            """,
+            (qvec.tolist(), store_kind, qvec.tolist(), limit),
         )
-        return [{"id": r[0], "text": r[1], "metadata": r[2], "score": float(r[3])} for r in cur.fetchall()]
+        return [
+            {
+                "id": r[0],
+                "text": r[1],
+                "metadata": r[2],
+                "score": float(r[3]),
+                "citation": r[4],
+                "file_url": r[5],
+            }
+            for r in cur.fetchall()
+        ]
 
 def knn_lecture(lecture_key: str, qvec: np.ndarray, limit=20):
     with conn_cursor() as cur:
         cur.execute(
-            f"""select id, text, metadata, 1 - (embedding <=> %s::vector) as score
-                from chunks
-                where store_kind = 2 and metadata->>'lecture_key' = %s
-                order by embedding <=> %s::vector
-                limit {limit}""",
-            (qvec.tolist(), lecture_key, qvec.tolist()),
+            """
+            select c.id, c.text, c.metadata,
+                   1 - (c.embedding <=> %s::vector) as score,
+                   d."Citation", d."FILE_URL"
+            from chunks c
+            left join documents d on d.id = c.doc_id
+            where c.store_kind = 2 and c.metadata->>'lecture_key' = %s
+            order by c.embedding <=> %s::vector
+            limit %s
+            """,
+            (qvec.tolist(), lecture_key, qvec.tolist(), limit),
         )
-        return [{"id": r[0], "text": r[1], "metadata": r[2], "score": float(r[3])} for r in cur.fetchall()]
+        return [
+            {
+                "id": r[0],
+                "text": r[1],
+                "metadata": r[2],
+                "score": float(r[3]),
+                "citation": r[4],
+                "file_url": r[5],
+            }
+            for r in cur.fetchall()
+        ]
 
 def detect_lecture(candidates: List[Dict]) -> Tuple[Optional[str], Dict[str, float]]:
     scores = defaultdict(float)
@@ -64,6 +104,35 @@ def detect_lecture(candidates: List[Dict]) -> Tuple[Optional[str], Dict[str, flo
         scores[k] = scores[k] / max(1, counts[k])
     best = max(scores.items(), key=lambda kv: kv[1])
     return best[0], dict(scores)
+
+def _citation_from_hit(hit: Dict[str, Any]) -> str:
+    citation = (hit.get("citation") or "").strip()
+    if citation:
+        return citation
+    metadata = hit.get("metadata") or {}
+    label = _readable_label(metadata)
+    return label or ""
+
+
+def _tag_for_hit(hit: Dict[str, Any], citation: str) -> str:
+    if citation:
+        clean = citation.strip()
+        return clean if clean.startswith("[") and clean.endswith("]") else f"[{clean}]"
+    metadata = hit.get("metadata") or {}
+    if metadata.get("store") == "global":
+        return "[Global]"
+    if metadata.get("store") == "user":
+        return "[User]"
+    if metadata.get("source") == "user_note":
+        return "[User]"
+    if metadata.get("slide_no") is not None and metadata.get("lecture_key"):
+        return f"[LEC {metadata.get('lecture_key')} / SLIDE {metadata.get('slide_no')}]"
+    if metadata.get("source") == "lecture_note" and metadata.get("lecture_key"):
+        return f"[LEC {metadata.get('lecture_key')} / LECTURE NOTE]"
+    if metadata.get("source") == "readings" and metadata.get("lecture_key"):
+        return f"[LEC {metadata.get('lecture_key')} / READINGS]"
+    return "[CTX]"
+
 
 def retrieve(query: str, lecture_force: Optional[str], use_global=True, user_id: Optional[str]=None):
     qvec = embed_texts([query])[0]
@@ -101,22 +170,33 @@ def retrieve(query: str, lecture_force: Optional[str], use_global=True, user_id:
     # merge (prioritize lecture → global → user)
     merged = []
     md = {}
-    tag = lambda md: (
-        f"[LEC {md.get('lecture_key')} / SLIDE {md.get('slide_no')}]" if md.get("slide_no") is not None
-        else (f"[LEC {md.get('lecture_key')} / LECTURE NOTE]" if md.get("source") == "lecture_note"
-              else "[GLOBAL]" if md.get("store") == "global" else "[USER]")
-    )
     for r in hits:
-        merged.append({**r, "tag": tag(r["metadata"])})
+        citation = _citation_from_hit(r)
+        r["citation"] = citation
+        merged.append({**r, "tag": _tag_for_hit(r, citation)})
     for r in global_hits:
-        md = dict(r["metadata"]); md["store"]="global"; r["metadata"]=md
-        merged.append({**r, "tag": tag(md)})
-    for r in user_hits:  merged.append({**r, "tag": "[USER]"})
+        md = dict(r["metadata"] or {})
+        md["store"] = "global"
+        r["metadata"] = md
+        citation = _citation_from_hit(r) or "Global"
+        r["citation"] = citation
+        merged.append({**r, "tag": _tag_for_hit(r, citation)})
+    for r in user_hits:
+        md = dict(r.get("metadata") or {})
+        md["store"] = "user"
+        r["metadata"] = md
+        citation = _citation_from_hit(r) or "From Previous Conversations"
+        r["citation"] = citation
+        merged.append({**r, "tag": _tag_for_hit(r, citation)})
 
     # truncate to ~top 12 by score
     merged.sort(key=lambda x: x["score"], reverse=True)
     results["hits"] = merged[:12]
-    results["label"] = _readable_label(md)
+    if merged:
+        primary = merged[0]
+        results["label"] = primary.get("citation") or _readable_label(primary.get("metadata") or {})
+    else:
+        results["label"] = ""
     return results
 
 def _readable_label(md):
@@ -132,4 +212,6 @@ def _readable_label(md):
 
     if md.get("store") == "global":
         return "Global"
-    return "User"
+    if md.get("store") == "user" or md.get("source") == "user_note":
+        return "From Previous Conversations"
+    return ""

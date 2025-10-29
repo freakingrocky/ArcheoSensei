@@ -72,15 +72,185 @@ function labelFromMeta(md: any) {
     return `From Lecture ${n}`;
   }
   if (md.store === "global") return "Global";
-  return md.source === "user_note" ? "User" : "";
+  if (md.store === "user" || md.source === "user_note") {
+    return "From Previous Conversations";
+  }
+  return "";
 }
 
-// Turn "[Lecture N Slide M]" → markdown link: (cite:lec_N:M)
-function toCiteLinks(text: string) {
-  return text.replace(
-    /\[Lecture\s+(\d+)\s+Slide\s+(\d+)\]/g,
-    (_m, n, s) => `[Lecture ${n} Slide ${s}](cite:lec_${n}:${s})`
+const REGEX_ESCAPE = /[.*+?^${}()|[\]\\]/g;
+
+function escapeRegExp(value: string) {
+  return value.replace(REGEX_ESCAPE, "\\$&");
+}
+
+function normalizeCitationLabel(raw: string | null | undefined) {
+  if (!raw) return "";
+  const trimmed = String(raw).trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function toCiteLinks(text: string, hits: Hit[]) {
+  if (!text || !hits?.length) return text;
+  let rewritten = text;
+  const seen = new Map<string, string>();
+  for (const hit of hits) {
+    if (hit == null) continue;
+    const citation = normalizeCitationLabel(hit.citation ?? hit.tag ?? "");
+    const id = hit.id != null ? String(hit.id) : "";
+    if (!citation || !id || seen.has(citation)) continue;
+    seen.set(citation, id);
+  }
+  const entries = Array.from(seen.entries()).sort(
+    (a, b) => b[0].length - a[0].length
   );
+  for (const [citation, id] of entries) {
+    const pattern = new RegExp(`\\[${escapeRegExp(citation)}\\]`, "g");
+    const replacement = `[${citation}](cite:${encodeURIComponent(id)})`;
+    rewritten = rewritten.replace(pattern, replacement);
+  }
+  return rewritten;
+}
+
+type ChunkMatch = {
+  start: number;
+  end: number;
+  matched: string;
+  query: string;
+};
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildChunkVariants(chunk: string): string[] {
+  const trimmed = chunk.trim();
+  if (!trimmed) return [];
+  const variants = new Set<string>();
+  variants.add(trimmed);
+  const collapsed = trimmed.replace(/\s+/g, " ");
+  variants.add(collapsed);
+  const words = collapsed.split(" ");
+  if (words.length > 1) {
+    const half = Math.ceil(words.length / 2);
+    variants.add(words.slice(0, half).join(" "));
+    variants.add(words.slice(words.length - half).join(" "));
+  }
+  const percents = [0.7, 0.6, 0.5, 0.4];
+  for (const pct of percents) {
+    const count = Math.max(4, Math.round(words.length * pct));
+    if (count >= words.length) continue;
+    variants.add(words.slice(0, count).join(" "));
+    variants.add(words.slice(Math.max(0, words.length - count)).join(" "));
+  }
+  return Array.from(variants)
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+}
+
+function findChunkMatch(docText: string, chunk: string): ChunkMatch | null {
+  const normalizedDoc = docText.replace(/\r\n/g, "\n");
+  const variants = buildChunkVariants(chunk);
+  for (const variant of variants) {
+    const escaped = escapeRegExp(variant);
+    if (!escaped) continue;
+    const pattern = escaped.replace(/\\s+/g, "\\s+");
+    const regex = new RegExp(pattern, "i");
+    const match = regex.exec(normalizedDoc);
+    if (match && typeof match.index === "number") {
+      return {
+        start: match.index,
+        end: match.index + match[0].length,
+        matched: match[0],
+        query: variant,
+      };
+    }
+  }
+  return null;
+}
+
+function buildDocumentHtml({
+  citation,
+  fileUrl,
+  docText,
+  match,
+  chunk,
+}: {
+  citation: string;
+  fileUrl: string;
+  docText: string;
+  match: ChunkMatch | null;
+  chunk: string;
+}) {
+  const safeCitation = escapeHtml(citation || "Source");
+  const safeUrl = escapeHtml(fileUrl);
+  const safeChunk = escapeHtml(chunk.trim());
+  const normalizedDoc = docText.replace(/\r\n/g, "\n");
+  let bodyHtml: string;
+  if (match) {
+    const before = escapeHtml(normalizedDoc.slice(0, match.start));
+    const highlighted = escapeHtml(normalizedDoc.slice(match.start, match.end));
+    const after = escapeHtml(normalizedDoc.slice(match.end));
+    bodyHtml = `${before}<mark id="__citation_hit">${highlighted}</mark>${after}`;
+  } else {
+    bodyHtml = escapeHtml(normalizedDoc);
+  }
+  const status = match
+    ? `<div class="status">Located chunk variant automatically.</div>`
+    : `<div class="status status--warn">Could not auto-locate the chunk. Showing full document for manual review.</div>`;
+  const variantInfo = match
+    ? `<div class="variant">Matched variant: <code>${escapeHtml(match.query)}</code></div>`
+    : "";
+  return `<!DOCTYPE html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>${safeCitation}</title>
+      <style>
+        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #0f1116; color: #f8fafc; }
+        header { padding: 16px 20px; background: #111827; border-bottom: 1px solid #1f2937; }
+        header h1 { margin: 0; font-size: 18px; }
+        header a { color: #93c5fd; text-decoration: none; }
+        main { padding: 20px; }
+        pre { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; overflow: auto; white-space: pre-wrap; line-height: 1.5; }
+        mark { background: #facc15; color: #111827; padding: 0 2px; border-radius: 4px; }
+        .status { font-size: 13px; margin-bottom: 8px; color: #cbd5f5; }
+        .status--warn { color: #facc15; }
+        .chunk { font-size: 13px; margin-bottom: 12px; color: #e0e7ff; }
+        .variant { font-size: 12px; margin-bottom: 12px; color: #9ca3af; }
+        code { background: rgba(148, 163, 184, 0.2); padding: 2px 4px; border-radius: 4px; }
+      </style>
+    </head>
+    <body>
+      <header>
+        <h1>${safeCitation}</h1>
+        <div><a href="${safeUrl}" target="_blank" rel="noopener">Open original file</a></div>
+      </header>
+      <main>
+        ${status}
+        ${variantInfo}
+        <div class="chunk"><strong>Chunk preview:</strong> ${safeChunk}</div>
+        <pre>${bodyHtml}</pre>
+      </main>
+      <script>
+        const el = document.getElementById("__citation_hit");
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.style.boxShadow = "0 0 0 4px rgba(250, 204, 21, 0.45)";
+          setTimeout(() => { el.style.boxShadow = ""; }, 2400);
+        }
+      </script>
+    </body>
+  </html>`;
 }
 
 type ClaimCheckEntry = {
@@ -528,6 +698,78 @@ export default function ChatPage() {
     setPopupSource(data);
   }
 
+  async function openCitation(hit: Hit) {
+    if (!hit) return;
+    const meta = hit.metadata || {};
+    const directUrl =
+      (typeof hit.file_url === "string" && hit.file_url) ||
+      (typeof meta.FILE_URL === "string" && meta.FILE_URL) ||
+      (typeof meta.file_url === "string" && meta.file_url) ||
+      (typeof meta.fileUrl === "string" && meta.fileUrl);
+    if (!directUrl) {
+      await openSourceByMeta(meta);
+      return;
+    }
+
+    try {
+      const res = await fetch(directUrl, { cache: "no-store" });
+      if (!res.ok) {
+        throw new Error(`Failed to fetch source (${res.status})`);
+      }
+      const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      const isText =
+        /text|json|csv|markdown|html|xml/.test(contentType) ||
+        directUrl.toLowerCase().endsWith(".txt") ||
+        directUrl.toLowerCase().endsWith(".md");
+
+      if (!isText) {
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const win = window.open(blobUrl, "_blank", "noopener");
+        if (win) {
+          win.addEventListener(
+            "load",
+            () => URL.revokeObjectURL(blobUrl),
+            { once: true }
+          );
+        } else {
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+        }
+        return;
+      }
+
+      const text = await res.text();
+      const match = findChunkMatch(text, hit.text || "");
+      const citationLabel =
+        normalizeCitationLabel(hit.citation ?? "") ||
+        labelFromMeta(meta) ||
+        "Source";
+      const html = buildDocumentHtml({
+        citation: citationLabel,
+        fileUrl: directUrl,
+        docText: text,
+        match,
+        chunk: hit.text || "",
+      });
+      const popup = window.open("", "_blank", "noopener");
+      if (popup) {
+        popup.document.write(html);
+        popup.document.close();
+      } else {
+        const blob = new Blob([html], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        window.open(url, "_blank", "noopener");
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+    } catch (err) {
+      console.error("Failed to open citation", err);
+      const opened = window.open(directUrl, "_blank", "noopener");
+      if (!opened) {
+        await openSourceByMeta(meta);
+      }
+    }
+  }
+
   const detectedLecture = diag?.lecture_forced || diag?.lecture_detected || "";
   const messages = activeChat?.messages || [];
 
@@ -623,8 +865,7 @@ export default function ChatPage() {
                   <ChatTurn
                     key={i}
                     msg={m}
-                    onOpenSourceMeta={openSourceByMeta}
-                    onOpenToken={openSource}
+                    onOpenCitation={openCitation}
                   />
                 ))}
               </div>
@@ -767,7 +1008,10 @@ function ValidationWarningModal({
         <ul className="mt-2 space-y-2 text-sm text-neutral-200">
           {hits.length ? (
             hits.map((h, idx) => {
-              const label = labelFromMeta(h.metadata) || h.tag;
+              const label =
+                normalizeCitationLabel(h.citation ?? "") ||
+                labelFromMeta(h.metadata) ||
+                h.tag;
               const filename = h.metadata?.filename;
               return (
                 <li key={idx} className="border border-neutral-800 rounded-lg p-2">
@@ -880,23 +1124,34 @@ function Composer({
  */
 function ChatTurn({
   msg,
-  onOpenSourceMeta,
-  onOpenToken,
+  onOpenCitation,
 }: {
   msg: Msg;
-  onOpenSourceMeta: (md: any) => void;
-  onOpenToken: (lec: string, slide: number) => void;
+  onOpenCitation: (hit: Hit) => void;
 }) {
   const isUser = msg.role === "user";
 
   const AssistantMarkdown = ({
     content,
     claimCheck,
+    hits,
   }: {
     content: string;
     claimCheck?: { claims?: ClaimCheckEntry[] } | null;
+    hits: Hit[];
   }) => {
-    const rewritten = toCiteLinks(content);
+    const rewritten = useMemo(
+      () => toCiteLinks(content, hits),
+      [content, hits]
+    );
+    const hitsById = useMemo(() => {
+      const map = new Map<string, Hit>();
+      for (const h of hits) {
+        if (h?.id == null) continue;
+        map.set(String(h.id), h);
+      }
+      return map;
+    }, [hits]);
     const highlightPlugin = useMemo(
       () => createClaimHighlighter(claimCheck?.claims ?? []),
       [claimCheck?.claims]
@@ -915,19 +1170,23 @@ function ChatTurn({
           components={{
             a: ({ href, children, ...props }) => {
               if (href?.startsWith("cite:")) {
-                const [, payload] = href.split("cite:");
-                const [lecPart, slideStr] = payload.split(":"); // lec_1:3
-                const lec = lecPart;
-                const slide = Number(slideStr);
+                const payload = href.slice(5);
+                const id = decodeURIComponent(payload);
+                const hit = hitsById.get(id);
+                const preview = hit?.text
+                  ? hit.text.replace(/\s+/g, " ").trim().slice(0, 400)
+                  : undefined;
                 return (
                   <button
                     type="button"
                     onClick={(e) => {
                       e.preventDefault();
-                      if (lec && Number.isFinite(slide))
-                        onOpenToken(lec, slide);
+                      if (hit) {
+                        onOpenCitation(hit);
+                      }
                     }}
                     className="inline text-indigo-300 underline decoration-dotted hover:text-indigo-200"
+                    title={preview}
                     {...props}
                   >
                     {children}
@@ -986,8 +1245,8 @@ function ChatTurn({
     );
   };
 
-  // Max 3 sources are already enforced at insertion time; this is just another safety slice
-  const hits = (msg.hits || []).slice(0, 3);
+  const allHits = msg.hits || [];
+  const hits = allHits.slice(0, 3);
   const factCheck = msg.fact_check;
   const factAttempts = factCheck?.attempts ?? [];
   const lastAttempt = factAttempts[factAttempts.length - 1];
@@ -1037,7 +1296,11 @@ function ChatTurn({
         {isUser ? (
           <div className="whitespace-pre-wrap">{msg.content}</div>
         ) : (
-          <AssistantMarkdown content={msg.content} claimCheck={claimCheck} />
+          <AssistantMarkdown
+            content={msg.content}
+            claimCheck={claimCheck}
+            hits={allHits}
+          />
         )}
 
         {!isUser && factCheck && (
@@ -1096,12 +1359,18 @@ function ChatTurn({
               {hits.map((h, idx) => (
                 <button
                   key={idx}
+                  type="button"
                   className="w-full text-left text-xs border border-neutral-800 rounded-xl p-2 hover:bg-neutral-800/40"
-                  onClick={() => onOpenSourceMeta(h.metadata)}
-                  title="Open slide"
+                  onClick={() => onOpenCitation(h)}
+                  title={
+                    h.text ? h.text.replace(/\s+/g, " ").trim() : undefined
+                  }
                 >
                   <div className="font-mono text-neutral-300">
-                    {labelFromMeta(h.metadata) || h.tag} · {h.score.toFixed(3)}
+                    {(h.citation && normalizeCitationLabel(h.citation)) ||
+                      labelFromMeta(h.metadata) ||
+                      h.tag}
+                    {` · ${h.score.toFixed(3)}`}
                   </div>
                   <div className="text-neutral-400 line-clamp-3">{h.text}</div>
                 </button>

@@ -68,7 +68,8 @@ def _build_context_from_hits(hits: List[Dict[str, Any]]) -> str:
     blocks, total = [], 0
     for h in hits:
         snippet = h.get("text", "").strip()
-        tag = h.get("tag", "[CTX]")
+        citation = (h.get("citation") or "").strip()
+        tag = h.get("tag") or (f"[{citation}]" if citation else "[CTX]")
         md = h.get("metadata") or {}
         filename = md.get("filename")
         file_hint = f" [FILE {filename}]" if filename else ""
