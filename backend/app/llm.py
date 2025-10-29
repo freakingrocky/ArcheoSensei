@@ -14,6 +14,192 @@ BASE = os.environ.get("GROQ_API_BASE", "https://api.groq.com")
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 API_KEY = os.environ.get("GROQ_API_KEY", "")
 
+
+QUIZ_ALLOWED_TYPES = {
+    "true_false",
+    "mcq_single",
+    "mcq_multi",
+    "short_answer",
+}
+
+_JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_structured_json(text: str) -> Dict[str, Any]:
+    if not text:
+        raise ValueError("Empty response from model")
+    candidate = text.strip()
+    match = _JSON_FENCE.search(candidate)
+    if match:
+        candidate = match.group(1).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse JSON payload: {exc}: {candidate[:200]}") from exc
+
+
+def _ensure_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def generate_quiz_item(context: str, topic: str, question_type: str) -> Dict[str, Any]:
+    if question_type not in QUIZ_ALLOWED_TYPES:
+        raise ValueError(f"Unsupported quiz question type: {question_type}")
+
+    safe_context = (context or "").strip()
+    if len(safe_context) > 6500:
+        safe_context = safe_context[:6500]
+
+    topic_label = topic.strip() or "the course material"
+    instructions = (
+        "You are a helpful tutor creating a quiz question. "
+        "Craft a question that tests conceptual understanding without relying on obscure trivia. "
+        "Keep the language clear and student-friendly."
+    )
+    schema_description = (
+        "Return JSON with keys: question_type, question_prompt, options, correct_answer, "
+        "answer_rubric, hint, answer_explanation. "
+        "question_type must be one of true_false, mcq_single, mcq_multi, short_answer. "
+        "For true_false use the options ['True','False']. "
+        "For mcq_single or mcq_multi provide between 3 and 5 options. "
+        "correct_answer should be a string for true_false, mcq_single, short_answer; "
+        "for mcq_multi return an array of the correct option strings. "
+        "answer_rubric should outline the key points a good answer must include. "
+        "hint should give a gentle nudge without revealing the answer. "
+        "answer_explanation should clearly explain the correct answer in 2-4 sentences."
+    )
+
+    prompt = (
+        f"Context to ground the question (may be empty):\n{safe_context}\n\n"
+        f"Desired question type: {question_type}\n"
+        f"Focus topic or lecture: {topic_label}\n"
+        "Create one question following the schema instructions."
+    )
+
+    messages = [
+        {"role": "system", "content": instructions + " " + schema_description},
+        {"role": "user", "content": prompt},
+    ]
+
+    raw = call_sig_gpt5(messages, temperature=0.6, max_tokens=700)
+    payload = _parse_structured_json(raw)
+
+    q_type = str(payload.get("question_type", question_type)).strip().lower()
+    if q_type not in QUIZ_ALLOWED_TYPES:
+        q_type = question_type
+
+    question_prompt = str(payload.get("question_prompt", "")).strip()
+    if not question_prompt:
+        raise ValueError("Model did not return a question prompt")
+
+    options = payload.get("options") if isinstance(payload.get("options"), list) else None
+    if q_type in {"mcq_single", "mcq_multi"}:
+        options = [str(opt).strip() for opt in (options or []) if str(opt).strip()]
+        if len(options) < 3:
+            raise ValueError("Multiple-choice questions require at least three options")
+    elif q_type == "true_false":
+        options = ["True", "False"]
+    else:
+        options = None
+
+    correct_answer = payload.get("correct_answer")
+    if q_type == "mcq_multi":
+        answers = _ensure_list(correct_answer)
+        if not answers:
+            raise ValueError("MCQ multi questions require at least one correct answer")
+        correct_answer = answers
+    else:
+        if isinstance(correct_answer, list):
+            correct_answer = ", ".join(str(v).strip() for v in correct_answer if str(v).strip())
+        correct_answer = str(correct_answer or "").strip()
+        if not correct_answer:
+            raise ValueError("Question is missing a correct answer")
+
+    hint = str(payload.get("hint", "")).strip()
+    answer_rubric = str(payload.get("answer_rubric", "")).strip()
+    explanation = str(payload.get("answer_explanation", "")).strip()
+
+    if not answer_rubric:
+        answer_rubric = "Highlight the central concept referenced in the question."
+    if not hint:
+        hint = "Think about the main idea presented in the lecture."
+    if not explanation:
+        explanation = "Review the core concept discussed to understand why this answer is correct."
+
+    return {
+        "question_type": q_type,
+        "question_prompt": question_prompt,
+        "options": options,
+        "correct_answer": correct_answer,
+        "answer_rubric": answer_rubric,
+        "hint": hint,
+        "answer_explanation": explanation,
+    }
+
+
+def grade_quiz_answer(
+    question: Dict[str, Any],
+    user_answer: Any,
+    context: str,
+) -> Dict[str, Any]:
+    safe_context = (context or "").strip()
+    if len(safe_context) > 6500:
+        safe_context = safe_context[:6500]
+
+    serialized_question = json.dumps(question, ensure_ascii=False)
+    if isinstance(user_answer, list):
+        answer_text = "\n".join(str(v).strip() for v in user_answer if str(v).strip())
+    else:
+        answer_text = str(user_answer or "").strip()
+
+    if not answer_text:
+        answer_text = "(no answer provided)"
+
+    grading_instructions = (
+        "You are grading a student's quiz response. Use the provided rubric, correct answer, and context. "
+        "Return JSON with keys: correct (boolean), score (0.0-1.0), assessment (concise summary), "
+        "good_points (array of strengths), bad_points (array of improvement areas). "
+        "Score should reflect partial credit when appropriate."
+    )
+
+    prompt = (
+        f"Context (may be empty):\n{safe_context}\n\n"
+        f"Question JSON:\n{serialized_question}\n\n"
+        f"Student answer:\n{answer_text}"
+    )
+
+    messages = [
+        {"role": "system", "content": grading_instructions},
+        {"role": "user", "content": prompt},
+    ]
+
+    raw = call_sig_gpt5(messages, temperature=0.2, max_tokens=600)
+    payload = _parse_structured_json(raw)
+
+    correct = bool(payload.get("correct"))
+    score_val = payload.get("score")
+    try:
+        score = float(score_val)
+    except (TypeError, ValueError):
+        score = 1.0 if correct else 0.0
+    score = max(0.0, min(1.0, score))
+
+    assessment = str(payload.get("assessment", "")).strip()
+    good_points = _ensure_list(payload.get("good_points"))
+    bad_points = _ensure_list(payload.get("bad_points"))
+
+    return {
+        "correct": correct,
+        "score": score,
+        "assessment": assessment or ("Strong answer." if correct else "Needs improvement."),
+        "good_points": good_points,
+        "bad_points": bad_points,
+    }
+
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 GEMINI_KEY = "AIzaSyBfhGNJ5FOHgn0rY3zzjemEX20KKz18A5o"
 
