@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
@@ -123,7 +117,9 @@ function createClaimHighlighter(claims: ClaimCheckEntry[]) {
       visit(tree, "text", (node: any, index: number, parent: any) => {
         if (!parent || typeof node.value !== "string") return;
         if (parent.type === "code" || parent.type === "inlineCode") return;
-        let segments = [{ text: node.value, claim: null as ClaimCheckEntry | null }];
+        let segments = [
+          { text: node.value, claim: null as ClaimCheckEntry | null },
+        ];
 
         for (const entry of sorted) {
           const nextSegments: typeof segments = [];
@@ -275,12 +271,17 @@ export default function ChatPage() {
     lecture_key: "",
     topic: "",
   });
-  const [quizActiveConfig, setQuizActiveConfig] = useState<QuizConfig | null>(null);
-  const [quizQuestion, setQuizQuestion] = useState<QuizQuestionPayload | null>(null);
+  const [quizActiveConfig, setQuizActiveConfig] = useState<QuizConfig | null>(
+    null
+  );
+  const [quizQuestion, setQuizQuestion] = useState<QuizQuestionPayload | null>(
+    null
+  );
   const [quizContext, setQuizContext] = useState("");
   const [quizHintVisible, setQuizHintVisible] = useState(false);
   const [quizAnswer, setQuizAnswer] = useState<string | string[]>("");
-  const [quizEvaluation, setQuizEvaluation] = useState<QuizGradeResponse | null>(null);
+  const [quizEvaluation, setQuizEvaluation] =
+    useState<QuizGradeResponse | null>(null);
   const [quizQuestionLoading, setQuizQuestionLoading] = useState(false);
   const [quizGrading, setQuizGrading] = useState(false);
   const [quizError, setQuizError] = useState("");
@@ -493,9 +494,7 @@ export default function ChatPage() {
       setQuizQuestion(res.question);
       setQuizContext(res.context || "");
       setQuizHintVisible(false);
-      setQuizAnswer(
-        res.question.question_type === "mcq_multi" ? [] : ""
-      );
+      setQuizAnswer(res.question.question_type === "mcq_multi" ? [] : "");
       setQuizStage("question");
       setQuizActiveConfig(normalized);
     } catch (err: any) {
@@ -599,7 +598,8 @@ export default function ChatPage() {
         }
         setStatusLine(status.message?.trim() || "");
         const aiStatus =
-          status.fact_ai_status === "passed" || status.fact_ai_status === "failed"
+          status.fact_ai_status === "passed" ||
+          status.fact_ai_status === "failed"
             ? status.fact_ai_status
             : null;
         const claimsStatus =
@@ -610,7 +610,11 @@ export default function ChatPage() {
         setFactAiStatus(aiStatus);
         setFactClaimsStatus(claimsStatus);
 
-        if (!handled && status.status !== "running" && status.status !== "queued") {
+        if (
+          !handled &&
+          status.status !== "running" &&
+          status.status !== "queued"
+        ) {
           handled = true;
           const fact = status.fact_check as FactCheckResult | undefined;
           const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
@@ -814,13 +818,16 @@ export default function ChatPage() {
       </div>
 
       {quizOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+        <div className="fixed overflow-y-auto inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
           <div className="w-full max-w-2xl rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-2xl font-semibold text-neutral-100">Quiz Me</h2>
+                <h2 className="text-2xl font-semibold text-neutral-100">
+                  Quiz Me
+                </h2>
                 <p className="text-sm text-neutral-400">
-                  Choose a lecture or enter a topic to generate a quick practice question.
+                  Choose a lecture or enter a topic to generate a quick practice
+                  question.
                 </p>
               </div>
               <button
@@ -1088,30 +1095,34 @@ export default function ChatPage() {
                             Score: {(quizEvaluation.score * 100).toFixed(0)}%
                           </div>
                         </div>
-                        {quizEvaluation.good_points.length > 0 && (
-                          <div>
-                            <div className="text-xs font-semibold uppercase tracking-wide text-emerald-300">
-                              Good points
+                        {quizEvaluation.good_points.length > 0 &&
+                          quizQuestion.question_type === "short_answer" && (
+                            <div>
+                              <div className="text-xs font-semibold uppercase tracking-wide text-emerald-300">
+                                Good points
+                              </div>
+                              <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-neutral-200">
+                                {quizEvaluation.good_points.map(
+                                  (point, idx) => (
+                                    <li key={`good-${idx}`}>{point}</li>
+                                  )
+                                )}
+                              </ul>
                             </div>
-                            <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-neutral-200">
-                              {quizEvaluation.good_points.map((point, idx) => (
-                                <li key={`good-${idx}`}>{point}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        {quizEvaluation.bad_points.length > 0 && (
-                          <div>
-                            <div className="text-xs font-semibold uppercase tracking-wide text-red-300">
-                              Needs work
+                          )}
+                        {quizEvaluation.bad_points.length > 0 &&
+                          quizQuestion.question_type === "short_answer" && (
+                            <div>
+                              <div className="text-xs font-semibold uppercase tracking-wide text-red-300">
+                                Needs work
+                              </div>
+                              <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-neutral-200">
+                                {quizEvaluation.bad_points.map((point, idx) => (
+                                  <li key={`bad-${idx}`}>{point}</li>
+                                ))}
+                              </ul>
                             </div>
-                            <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-neutral-200">
-                              {quizEvaluation.bad_points.map((point, idx) => (
-                                <li key={`bad-${idx}`}>{point}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
+                          )}
                         <div className="rounded-lg bg-neutral-900 px-3 py-2 text-sm text-neutral-300">
                           <div className="text-xs uppercase tracking-wide text-neutral-500">
                             Explanation
@@ -1258,10 +1269,15 @@ function ValidationWarningModal({
               const label = labelFromMeta(h.metadata) || h.tag;
               const filename = h.metadata?.filename;
               return (
-                <li key={idx} className="border border-neutral-800 rounded-lg p-2">
+                <li
+                  key={idx}
+                  className="border border-neutral-800 rounded-lg p-2"
+                >
                   <div className="font-medium text-neutral-100">{label}</div>
                   {filename && (
-                    <div className="text-xs text-neutral-400">File: {filename}</div>
+                    <div className="text-xs text-neutral-400">
+                      File: {filename}
+                    </div>
                   )}
                   <div className="text-xs text-neutral-400 line-clamp-3 mt-1">
                     {h.text}
@@ -1511,7 +1527,11 @@ function ChatTurn({
       : null;
   const maxAttemptsDisplay =
     factCheck?.max_attempts ??
-    (factAttempts.length ? factAttempts.length : factCheck ? factCheck.retry_count + 1 : 1);
+    (factAttempts.length
+      ? factAttempts.length
+      : factCheck
+      ? factCheck.retry_count + 1
+      : 1);
 
   return (
     <div className="flex">
@@ -1536,26 +1556,33 @@ function ChatTurn({
             {factCheck.status === "passed" ? (
               <div className="text-[11px] text-green-300">
                 Passed fact checks
-                {confidencePct !== null && ` · LLM confidence ${confidencePct}%`}
+                {confidencePct !== null &&
+                  ` · LLM confidence ${confidencePct}%`}
                 {entailmentPct !== null && (
                   <>
-                    {" "}· Evidence entailment {entailmentPct}%
-                    {entailedClaims !== null && totalClaims !== null &&
+                    {" "}
+                    · Evidence entailment {entailmentPct}%
+                    {entailedClaims !== null &&
+                      totalClaims !== null &&
                       ` (${entailedClaims}/${totalClaims} claims)`}
-                    {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
+                    {entailmentTarget !== null &&
+                      ` · target ${entailmentTarget}%`}
                   </>
                 )}
               </div>
             ) : (
               <div className="text-[11px] text-yellow-300">
                 Failed validation after {maxAttemptsDisplay} attempts.
-                {factCheck.message ? ` ${factCheck.message}` : " Answer may be unreliable."}
+                {factCheck.message
+                  ? ` ${factCheck.message}`
+                  : " Answer may be unreliable."}
               </div>
             )}
             {factCheck.status !== "passed" && entailmentPct !== null && (
               <div className="text-[11px] text-neutral-400 mt-1">
                 Evidence entailment {entailmentPct}%
-                {entailedClaims !== null && totalClaims !== null &&
+                {entailedClaims !== null &&
+                  totalClaims !== null &&
                   ` (${entailedClaims}/${totalClaims} claims)`}
                 {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
               </div>
@@ -1566,11 +1593,13 @@ function ChatTurn({
                 {factCheck.retry_count === 1 ? "retry" : "retries"}.
               </div>
             )}
-            {factCheck.status !== "passed" && failingSnippet && failingLabel && (
-              <div className="text-[11px] text-red-300 mt-1">
-                Key issue: “{failingSnippet}” → {failingLabel}
-              </div>
-            )}
+            {factCheck.status !== "passed" &&
+              failingSnippet &&
+              failingLabel && (
+                <div className="text-[11px] text-red-300 mt-1">
+                  Key issue: “{failingSnippet}” → {failingLabel}
+                </div>
+              )}
           </div>
         )}
 

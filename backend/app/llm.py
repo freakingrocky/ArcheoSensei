@@ -596,17 +596,6 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n", re.MULTILINE)
 _CITATION_RE = re.compile(r"\[[^\]]+\]")
 
 
-def _load_mnli():
-    global _MNLI_MODEL, _MNLI_TOKENIZER
-    if _MNLI_MODEL is None or _MNLI_TOKENIZER is None:
-        _MNLI_TOKENIZER = AutoTokenizer.from_pretrained(_MNLI_MODEL_NAME, token=settings.HUGGINGFACE_TOKEN or None)
-        _MNLI_MODEL = AutoModelForSequenceClassification.from_pretrained(
-            _MNLI_MODEL_NAME, token=settings.HUGGINGFACE_TOKEN or None
-        )
-        _MNLI_MODEL.eval()
-    return _MNLI_MODEL, _MNLI_TOKENIZER
-
-
 def _strip_citations(text: str) -> str:
     return _CITATION_RE.sub("", text).strip()
 
