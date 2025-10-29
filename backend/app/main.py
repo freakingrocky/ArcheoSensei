@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
+import random
 import orjson
 from fastapi.responses import JSONResponse
 
@@ -9,8 +10,17 @@ from .ingest import ingest_files
 from .retrieve import retrieve
 from .db import conn_cursor
 from .embed import embed_texts
-from .schemas import QueryRequest, UploadLectureRequest, MemorizeRequest, QueryOptions
-from .llm import groq_get_models, run_fact_check_pipeline
+from .schemas import (
+    QueryRequest,
+    UploadLectureRequest,
+    MemorizeRequest,
+    QueryOptions,
+    QuizQuestionRequest,
+    QuizQuestionResponse,
+    QuizGradeRequest,
+    QuizGradeResponse,
+)
+from .llm import groq_get_models, run_fact_check_pipeline, generate_quiz_item, grade_quiz_answer
 from .jobs import jobs
 
 
@@ -192,6 +202,55 @@ def _process_query_job(job_id: str, req: QueryRequest) -> None:
         fact_check=result.get("fact_check"),
         llm=result.get("llm"),
     )
+
+
+# Quiz helpers
+def _sanitize_question_type(qtype: Optional[str]) -> str:
+    allowed = {"true_false", "mcq_single", "mcq_multi", "short_answer"}
+    if qtype and qtype.lower() in allowed:
+        return qtype.lower()
+    return random.choice(sorted(allowed))
+
+
+@app.post("/quiz/question", response_model=QuizQuestionResponse)
+def quiz_question(req: QuizQuestionRequest):
+    if not req.topic and not req.lecture_key:
+        raise HTTPException(status_code=400, detail="Provide a topic or lecture key")
+
+    question_type = _sanitize_question_type(req.question_type)
+    query = (req.topic or "").strip()
+    if not query and req.lecture_key:
+        query = f"Key ideas from {req.lecture_key}"
+
+    retrieval = retrieve(
+        query=query or "Key ideas from the course",
+        lecture_force=req.lecture_key,
+        use_global=not bool(req.lecture_key),
+        user_id=None,
+    )
+    context = _build_context_from_hits(retrieval.get("hits", []))
+
+    try:
+        question = generate_quiz_item(context, query or (req.lecture_key or "course material"), question_type)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to generate quiz question: {exc}") from exc
+
+    return QuizQuestionResponse(
+        question=question,
+        context=context,
+        lecture_key=req.lecture_key,
+        topic=req.topic,
+    )
+
+
+@app.post("/quiz/grade", response_model=QuizGradeResponse)
+def quiz_grade(req: QuizGradeRequest):
+    try:
+        result = grade_quiz_answer(req.question.dict(), req.user_answer, req.context)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to grade response: {exc}") from exc
+
+    return QuizGradeResponse(**result)
 
 
 @app.post("/query")
