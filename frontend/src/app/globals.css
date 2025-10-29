@@ -27,18 +27,38 @@ body {
 
 .claim-chip {
   position: relative;
-  border-bottom: 2px dotted currentColor;
   cursor: help;
+  text-decoration: none;
+  text-decoration-thickness: 2px;
+  text-decoration-skip-ink: auto;
 }
 
 .claim-chip--verified {
   color: inherit;
-  border-color: #34d399;
+  text-decoration-line: underline;
+  text-decoration-color: #34d399;
 }
 
-.claim-chip--unverified {
+.claim-chip--failed {
+  color: #f87171;
+  text-decoration-line: line-through;
+  text-decoration-color: #f87171;
+}
+
+.claim-chip--unsure {
   color: inherit;
-  border-color: #f87171;
+  background-color: rgba(250, 204, 21, 0.35);
+  border-radius: 0.35rem;
+  padding: 0 0.1em;
+}
+
+.claim-chip-legend {
+  cursor: default;
+  pointer-events: none;
+}
+
+.claim-chip-legend::after {
+  display: none;
 }
 
 .claim-chip::after {

@@ -147,17 +147,66 @@ function createClaimHighlighter(claims: ClaimCheckEntry[]) {
           if (!seg.claim) {
             return { type: "text", value: seg.text };
           }
-          const verified = seg.claim.label === "entailment";
+
+          const normalizedLabel = seg.claim.label?.toLowerCase().trim() ?? "";
+          const negativeTokens = [
+            "contradiction",
+            "refuted",
+            "failed",
+            "false",
+            "incorrect",
+            "rejected",
+            "unsupported",
+            "not supported",
+          ];
+          const positiveTokens = ["entailment", "supported", "support"];
+          const unsureTokens = [
+            "neutral",
+            "unknown",
+            "uncertain",
+            "not sure",
+            "insufficient",
+            "undetermined",
+          ];
+
+          let status: "verified" | "failed" | "unsure" = "unsure";
+          if (
+            normalizedLabel &&
+            negativeTokens.some((token) => normalizedLabel.includes(token))
+          ) {
+            status = "failed";
+          } else if (
+            normalizedLabel &&
+            positiveTokens.some((token) => normalizedLabel.includes(token))
+          ) {
+            status = "verified";
+          } else if (
+            normalizedLabel &&
+            unsureTokens.some((token) => normalizedLabel.includes(token))
+          ) {
+            status = "unsure";
+          } else if (!normalizedLabel) {
+            status = "unsure";
+          } else {
+            status = "failed";
+          }
+
+          const statusClass =
+            status === "verified"
+              ? "claim-chip--verified"
+              : status === "failed"
+              ? "claim-chip--failed"
+              : "claim-chip--unsure";
+
           return {
             type: "claimHighlight",
             data: {
               hName: "span",
               hProperties: {
-                className: `claim-chip ${
-                  verified ? "claim-chip--verified" : "claim-chip--unverified"
-                }`,
+                className: `claim-chip ${statusClass}`,
                 tabIndex: 0,
                 "data-tooltip": seg.claim.context || "",
+                "data-claim-status": status,
               },
             },
             children: [{ type: "text", value: seg.text }],
@@ -1083,6 +1132,34 @@ function ChatTurn({
                 Key issue: “{failingSnippet}” → {failingLabel}
               </div>
             )}
+            {claimCheck?.claims?.length ? (
+              <div className="mt-3 text-[10px] text-neutral-500 flex flex-wrap items-center gap-2">
+                <span className="uppercase tracking-wide text-neutral-400 font-semibold">
+                  Legend
+                </span>
+                <span
+                  className="claim-chip claim-chip-legend claim-chip--verified"
+                  data-tooltip=""
+                  tabIndex={-1}
+                >
+                  Verified
+                </span>
+                <span
+                  className="claim-chip claim-chip-legend claim-chip--failed"
+                  data-tooltip=""
+                  tabIndex={-1}
+                >
+                  Failed verification
+                </span>
+                <span
+                  className="claim-chip claim-chip-legend claim-chip--unsure"
+                  data-tooltip=""
+                  tabIndex={-1}
+                >
+                  Needs review
+                </span>
+              </div>
+            ) : null}
           </div>
         )}
 
