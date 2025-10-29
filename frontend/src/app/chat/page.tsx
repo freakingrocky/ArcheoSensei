@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
@@ -15,6 +9,11 @@ import {
   LectureItem,
   startQueryJob,
   fetchQueryJob,
+  requestQuizQuestion,
+  gradeQuizAnswer,
+  QuizQuestionPayload,
+  QuizGradeResponse,
+  QuizQuestionType,
 } from "@/lib/api";
 import {
   Chat,
@@ -41,6 +40,131 @@ type Phase =
   | "fact_ai"
   | "fact_claims"
   | "done";
+
+type QuizStage = "config" | "question";
+
+type QuizConfig = {
+  lecture_key: string;
+  topic: string;
+};
+
+type QuizAttempt = {
+  question: QuizQuestionPayload;
+  evaluation: QuizGradeResponse;
+  context: string;
+  lecture_key?: string | null;
+  topic?: string | null;
+};
+
+type QuizSessionSummary = {
+  attempted: number;
+  averageScore: number;
+  correctCount: number;
+  improvementTips: string[];
+  suggestedReadings: string[];
+  topicsCovered: string[];
+};
+
+function truncateMiddle(text: string, maxLength = 140) {
+  if (!text) return "";
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function extractReferenceCandidates(context: string) {
+  if (!context) return [] as string[];
+  const lines = context
+    .split(/\n+/)
+    .map((line) => line.replace(/^[-•\s]+/, "").trim())
+    .filter(Boolean);
+  const refs: string[] = [];
+  const matcher = /(lecture|reading|source|slide|chapter|section)/i;
+  for (const line of lines) {
+    if (matcher.test(line)) {
+      refs.push(truncateMiddle(line, 160));
+    }
+  }
+  return refs;
+}
+
+function buildQuizSummary(attempts: QuizAttempt[]): QuizSessionSummary | null {
+  if (!attempts.length) return null;
+  const attempted = attempts.length;
+  const totalScore = attempts.reduce(
+    (sum, entry) =>
+      sum +
+      (Number.isFinite(entry.evaluation.score) ? entry.evaluation.score : 0),
+    0
+  );
+  const correctCount = attempts.filter(
+    (entry) => entry.evaluation.correct
+  ).length;
+
+  const improvement = new Map<string, string>();
+  const topics = new Map<string, string>();
+  const suggestions = new Map<string, string>();
+
+  for (const entry of attempts) {
+    for (const point of entry.evaluation.bad_points || []) {
+      const key = point.trim().toLowerCase();
+      if (key && !improvement.has(key)) {
+        improvement.set(key, point.trim());
+      }
+    }
+
+    const topicLabel = (() => {
+      if (entry.topic && entry.topic.trim()) return entry.topic.trim();
+      if (entry.lecture_key && entry.lecture_key.trim())
+        return entry.lecture_key.trim();
+      const prompt = entry.question.question_prompt?.trim();
+      return truncateMiddle(prompt || "General review", 80);
+    })();
+    const topicKey = topicLabel.toLowerCase();
+    if (topicKey && !topics.has(topicKey)) {
+      topics.set(topicKey, topicLabel);
+    }
+
+    const refs = extractReferenceCandidates(entry.context || "");
+    for (const ref of refs) {
+      const refKey = ref.toLowerCase();
+      if (refKey && !suggestions.has(refKey)) {
+        suggestions.set(refKey, ref);
+      }
+    }
+  }
+
+  if (!suggestions.size) {
+    for (const entry of attempts) {
+      if (entry.topic && entry.topic.trim()) {
+        const msg = `Brush up on readings related to ${entry.topic.trim()}.`;
+        const key = msg.toLowerCase();
+        if (!suggestions.has(key)) suggestions.set(key, msg);
+      } else if (entry.lecture_key && entry.lecture_key.trim()) {
+        const msg = `Revisit lecture materials for ${entry.lecture_key.trim()}.`;
+        const key = msg.toLowerCase();
+        if (!suggestions.has(key)) suggestions.set(key, msg);
+      }
+    }
+  }
+
+  if (!suggestions.size) {
+    suggestions.set(
+      "general-review",
+      "Review the retrieved notes highlighted in each quiz question."
+    );
+  }
+
+  const averageScore = attempted ? totalScore / attempted : 0;
+
+  return {
+    attempted,
+    averageScore,
+    correctCount,
+    improvementTips: Array.from(improvement.values()),
+    suggestedReadings: Array.from(suggestions.values()).slice(0, 5),
+    topicsCovered: Array.from(topics.values()),
+  };
+}
 
 const LOADING_LINES = [
   "Good question, lemme check the lectures…",
@@ -111,7 +235,9 @@ function createClaimHighlighter(claims: ClaimCheckEntry[]) {
       visit(tree, "text", (node: any, index: number, parent: any) => {
         if (!parent || typeof node.value !== "string") return;
         if (parent.type === "code" || parent.type === "inlineCode") return;
-        let segments = [{ text: node.value, claim: null as ClaimCheckEntry | null }];
+        let segments = [
+          { text: node.value, claim: null as ClaimCheckEntry | null },
+        ];
 
         for (const entry of sorted) {
           const nextSegments: typeof segments = [];
@@ -257,6 +383,38 @@ export default function ChatPage() {
     details?: string;
   } | null>(null);
   const jobChatRef = useRef<string | null>(null);
+  const [quizOpen, setQuizOpen] = useState(false);
+  const [quizStage, setQuizStage] = useState<QuizStage>("config");
+  const [quizConfig, setQuizConfig] = useState<QuizConfig>({
+    lecture_key: "",
+    topic: "",
+  });
+  const [quizActiveConfig, setQuizActiveConfig] = useState<QuizConfig | null>(
+    null
+  );
+  const [quizQuestion, setQuizQuestion] = useState<QuizQuestionPayload | null>(
+    null
+  );
+  const [quizContext, setQuizContext] = useState("");
+  const [quizHintVisible, setQuizHintVisible] = useState(false);
+  const [quizAnswer, setQuizAnswer] = useState<string | string[]>("");
+  const [quizEvaluation, setQuizEvaluation] =
+    useState<QuizGradeResponse | null>(null);
+  const [quizQuestionLoading, setQuizQuestionLoading] = useState(false);
+  const [quizGrading, setQuizGrading] = useState(false);
+  const [quizError, setQuizError] = useState("");
+  const [quizHistory, setQuizHistory] = useState<QuizAttempt[]>([]);
+  const [quizSummary, setQuizSummary] = useState<QuizSessionSummary | null>(
+    null
+  );
+  const [quizSummaryVisible, setQuizSummaryVisible] = useState(false);
+  const quizTypeIndexRef = useRef(0);
+  const quizTypes: QuizQuestionType[] = [
+    "true_false",
+    "mcq_single",
+    "short_answer",
+    "mcq_multi",
+  ];
   const progressPct =
     phase === "idle"
       ? 0
@@ -399,6 +557,164 @@ export default function ChatPage() {
     }
   };
 
+  const nextQuizType = () => {
+    const idx = quizTypeIndexRef.current;
+    const type = quizTypes[idx];
+    quizTypeIndexRef.current = (idx + 1) % quizTypes.length;
+    return type;
+  };
+
+  function handleOpenQuiz() {
+    setQuizOpen(true);
+    setQuizStage("config");
+    setQuizConfig({
+      lecture_key: selectedLecture || "",
+      topic: "",
+    });
+    setQuizActiveConfig(null);
+    setQuizQuestion(null);
+    setQuizContext("");
+    setQuizHintVisible(false);
+    setQuizAnswer("");
+    setQuizEvaluation(null);
+    setQuizError("");
+    setQuizHistory([]);
+    setQuizSummary(null);
+    setQuizSummaryVisible(false);
+  }
+
+  function handleCloseQuiz() {
+    const summary = buildQuizSummary(quizHistory);
+    if (summary) {
+      setQuizSummary(summary);
+      setQuizSummaryVisible(true);
+    } else {
+      setQuizSummary(null);
+      setQuizSummaryVisible(false);
+    }
+    setQuizOpen(false);
+    setQuizStage("config");
+    setQuizConfig({ lecture_key: "", topic: "" });
+    setQuizActiveConfig(null);
+    setQuizQuestion(null);
+    setQuizContext("");
+    setQuizHintVisible(false);
+    setQuizAnswer("");
+    setQuizEvaluation(null);
+    setQuizQuestionLoading(false);
+    setQuizGrading(false);
+    setQuizError("");
+    setQuizHistory([]);
+  }
+
+  const generateQuiz = async (config: QuizConfig) => {
+    if (quizQuestionLoading) return;
+    setQuizQuestionLoading(true);
+    setQuizError("");
+    setQuizQuestion(null);
+    setQuizEvaluation(null);
+    setQuizHintVisible(false);
+    setQuizAnswer("");
+    try {
+      const normalized: QuizConfig = {
+        lecture_key: (config.lecture_key || "").trim(),
+        topic: (config.topic || "").trim(),
+      };
+      const type = nextQuizType();
+      const res = await requestQuizQuestion({
+        lecture_key: normalized.lecture_key || undefined,
+        topic: normalized.topic || undefined,
+        question_type: type,
+      });
+      setQuizQuestion(res.question);
+      setQuizContext(res.context || "");
+      setQuizHintVisible(false);
+      setQuizAnswer(res.question.question_type === "mcq_multi" ? [] : "");
+      setQuizStage("question");
+      setQuizActiveConfig({
+        lecture_key: res.lecture_key || normalized.lecture_key,
+        topic: res.topic || normalized.topic,
+      });
+    } catch (err: any) {
+      setQuizError(err?.message ?? "Unable to generate quiz question");
+    } finally {
+      setQuizQuestionLoading(false);
+    }
+  };
+
+  const handleQuizSubmit = async () => {
+    if (!quizQuestion || quizGrading) return;
+    const answerPayload = Array.isArray(quizAnswer)
+      ? quizAnswer
+      : quizAnswer.toString().trim();
+    const hasAnswer = Array.isArray(answerPayload)
+      ? answerPayload.length > 0
+      : answerPayload.length > 0;
+    if (!hasAnswer) {
+      setQuizError("Please provide an answer before submitting.");
+      return;
+    }
+    setQuizGrading(true);
+    setQuizError("");
+    try {
+      const result = await gradeQuizAnswer({
+        question: quizQuestion,
+        context: quizContext,
+        user_answer: answerPayload,
+      });
+      setQuizEvaluation(result);
+      setQuizHistory((prev) => {
+        const entry: QuizAttempt = {
+          question: quizQuestion,
+          evaluation: result,
+          context: quizContext,
+          lecture_key: quizActiveConfig?.lecture_key,
+          topic: quizActiveConfig?.topic,
+        };
+        if (prev.length) {
+          const last = prev[prev.length - 1];
+          if (last.question.question_prompt === quizQuestion.question_prompt) {
+            return [...prev.slice(0, prev.length - 1), entry];
+          }
+        }
+        return [...prev, entry];
+      });
+    } catch (err: any) {
+      setQuizError(err?.message ?? "Failed to grade answer");
+    } finally {
+      setQuizGrading(false);
+    }
+  };
+
+  const handleQuizNext = () => {
+    const base = quizActiveConfig || quizConfig;
+    if (!base) return;
+    generateQuiz(base);
+  };
+
+  const handleQuizHint = () => {
+    setQuizHintVisible(true);
+  };
+
+  const quizAnswerHasValue = Array.isArray(quizAnswer)
+    ? quizAnswer.length > 0
+    : quizAnswer.toString().trim().length > 0;
+
+  const quizTypeLabel = (type?: QuizQuestionType) => {
+    switch (type) {
+      case "true_false":
+        return "True or False";
+      case "mcq_single":
+        return "Multiple Choice (single answer)";
+      case "mcq_multi":
+        return "Multiple Choice (choose all that apply)";
+      case "short_answer":
+        return "Short Answer";
+      default:
+        return "Question";
+    }
+  };
+
   useEffect(() => {
     if (!jobId) return;
     let cancelled = false;
@@ -436,7 +752,8 @@ export default function ChatPage() {
         }
         setStatusLine(status.message?.trim() || "");
         const aiStatus =
-          status.fact_ai_status === "passed" || status.fact_ai_status === "failed"
+          status.fact_ai_status === "passed" ||
+          status.fact_ai_status === "failed"
             ? status.fact_ai_status
             : null;
         const claimsStatus =
@@ -447,7 +764,11 @@ export default function ChatPage() {
         setFactAiStatus(aiStatus);
         setFactClaimsStatus(claimsStatus);
 
-        if (!handled && status.status !== "running" && status.status !== "queued") {
+        if (
+          !handled &&
+          status.status !== "running" &&
+          status.status !== "queued"
+        ) {
           handled = true;
           const fact = status.fact_check as FactCheckResult | undefined;
           const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
@@ -540,6 +861,12 @@ export default function ChatPage() {
           className="w-full mb-3 rounded-lg bg-white text-black font-semibold py-2 hover:opacity-90"
         >
           + New Chat
+        </button>
+        <button
+          onClick={handleOpenQuiz}
+          className="w-full mb-4 rounded-lg border border-neutral-800 text-neutral-200 font-semibold py-2 hover:bg-neutral-900"
+        >
+          🎯 Quiz Me
         </button>
         <div className="text-xs text-neutral-400 mb-2">Chats</div>
         <div className="flex-1 overflow-auto space-y-1">
@@ -644,6 +971,332 @@ export default function ChatPage() {
         />
       </div>
 
+      {quizOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-semibold text-neutral-100">
+                  Quiz Me
+                </h2>
+                <p className="text-sm text-neutral-400">
+                  Choose a lecture or enter a topic to generate a quick practice
+                  question.
+                </p>
+              </div>
+              <button
+                onClick={handleCloseQuiz}
+                className="rounded-full border border-neutral-700 px-3 py-1 text-sm text-neutral-300 hover:bg-neutral-800"
+              >
+                Close
+              </button>
+            </div>
+
+            {quizStage === "config" ? (
+              <div className="mt-6 space-y-5">
+                <div>
+                  <label className="block text-sm font-medium text-neutral-300">
+                    Choose a lecture
+                  </label>
+                  <select
+                    className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-600"
+                    value={quizConfig.lecture_key}
+                    onChange={(e) =>
+                      setQuizConfig((prev) => ({
+                        ...prev,
+                        lecture_key: e.target.value,
+                      }))
+                    }
+                    onFocus={() => setQuizError("")}
+                  >
+                    <option value="">All lectures</option>
+                    {lectures.map((l) => (
+                      <option key={l.lecture_key} value={l.lecture_key}>
+                        {l.lecture_key} ({l.count})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-neutral-300">
+                    Or type any topic
+                  </label>
+                  <input
+                    value={quizConfig.topic}
+                    onChange={(e) =>
+                      setQuizConfig((prev) => ({
+                        ...prev,
+                        topic: e.target.value,
+                      }))
+                    }
+                    placeholder="e.g. Stratigraphy basics"
+                    className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-600"
+                    onFocus={() => setQuizError("")}
+                  />
+                </div>
+
+                {quizError && quizStage === "config" && (
+                  <div className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                    {quizError}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-3 pt-2">
+                  <button
+                    onClick={handleCloseQuiz}
+                    className="rounded-lg border border-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-800"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => generateQuiz(quizConfig)}
+                    disabled={
+                      (!quizConfig.lecture_key && !quizConfig.topic.trim()) ||
+                      quizQuestionLoading
+                    }
+                    className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {quizQuestionLoading ? "Generating…" : "Quiz Me"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-6 space-y-5">
+                <div className="flex flex-wrap items-center gap-2 text-sm text-neutral-400">
+                  {quizActiveConfig?.lecture_key && (
+                    <span className="rounded-full bg-neutral-800 px-3 py-1 text-xs uppercase tracking-wide text-indigo-300">
+                      {quizActiveConfig.lecture_key}
+                    </span>
+                  )}
+                  {quizActiveConfig?.topic && (
+                    <span className="rounded-full bg-neutral-800 px-3 py-1 text-xs text-neutral-200">
+                      Topic: {quizActiveConfig.topic}
+                    </span>
+                  )}
+                  <span className="rounded-full bg-neutral-800 px-3 py-1 text-xs text-neutral-200">
+                    {quizTypeLabel(quizQuestion?.question_type)}
+                  </span>
+                </div>
+
+                {quizQuestionLoading && !quizQuestion ? (
+                  <div className="flex items-center justify-center rounded-xl border border-dashed border-neutral-700 py-16 text-neutral-400">
+                    Generating your question…
+                  </div>
+                ) : quizQuestion ? (
+                  <div className="space-y-5">
+                    <div>
+                      <div className="text-lg font-semibold text-neutral-100">
+                        {quizQuestion.question_prompt}
+                      </div>
+                    </div>
+
+                    {quizQuestion.question_type === "true_false" && (
+                      <div className="space-y-3">
+                        {["True", "False"].map((choice) => (
+                          <label
+                            key={choice}
+                            className="flex cursor-pointer items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 hover:border-neutral-600"
+                          >
+                            <input
+                              type="radio"
+                              className="h-4 w-4"
+                              checked={
+                                !Array.isArray(quizAnswer) &&
+                                quizAnswer === choice
+                              }
+                              onChange={() => {
+                                setQuizError("");
+                                setQuizAnswer(choice);
+                              }}
+                            />
+                            {choice}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    {quizQuestion.question_type === "mcq_single" && (
+                      <div className="space-y-3">
+                        {(quizQuestion.options || []).map((opt) => (
+                          <label
+                            key={opt}
+                            className="flex cursor-pointer items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 hover:border-neutral-600"
+                          >
+                            <input
+                              type="radio"
+                              className="h-4 w-4"
+                              checked={
+                                !Array.isArray(quizAnswer) && quizAnswer === opt
+                              }
+                              onChange={() => {
+                                setQuizError("");
+                                setQuizAnswer(opt);
+                              }}
+                            />
+                            {opt}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    {quizQuestion.question_type === "mcq_multi" && (
+                      <div className="space-y-3">
+                        {(quizQuestion.options || []).map((opt) => {
+                          const checked =
+                            Array.isArray(quizAnswer) &&
+                            quizAnswer.includes(opt);
+                          return (
+                            <label
+                              key={opt}
+                              className="flex cursor-pointer items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 hover:border-neutral-600"
+                            >
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={checked}
+                                onChange={() =>
+                                  setQuizAnswer((prev) => {
+                                    setQuizError("");
+                                    const arr = Array.isArray(prev)
+                                      ? [...prev]
+                                      : [];
+                                    if (arr.includes(opt)) {
+                                      return arr.filter((v) => v !== opt);
+                                    }
+                                    arr.push(opt);
+                                    return arr;
+                                  })
+                                }
+                              />
+                              {opt}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {quizQuestion.question_type === "short_answer" && (
+                      <textarea
+                        value={
+                          Array.isArray(quizAnswer)
+                            ? quizAnswer.join(", ")
+                            : quizAnswer
+                        }
+                        onChange={(e) => {
+                          setQuizError("");
+                          setQuizAnswer(e.target.value);
+                        }}
+                        rows={4}
+                        className="w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-600"
+                        placeholder="Write your answer here"
+                      />
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        onClick={handleQuizHint}
+                        disabled={quizHintVisible || quizQuestionLoading}
+                        className="rounded-lg border border-neutral-700 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        Give me a hint
+                      </button>
+                      <button
+                        onClick={handleQuizSubmit}
+                        disabled={!quizAnswerHasValue || quizGrading}
+                        className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {quizGrading ? "Grading…" : "Submit answer"}
+                      </button>
+                      <button
+                        onClick={handleQuizNext}
+                        disabled={!quizEvaluation || quizQuestionLoading}
+                        className="rounded-lg border border-neutral-700 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        Go to next
+                      </button>
+                    </div>
+
+                    {quizHintVisible && (
+                      <div className="rounded-lg border border-amber-500/60 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                        {quizQuestion.hint}
+                      </div>
+                    )}
+
+                    {quizError && quizStage === "question" && (
+                      <div className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                        {quizError}
+                      </div>
+                    )}
+
+                    {quizEvaluation && quizQuestion && (
+                      <div className="overflow-y-auto space-y-3 rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-4">
+                        <div className="flex items-center gap-3">
+                          <div
+                            className={`h-3 w-3 rounded-full ${
+                              quizEvaluation.correct
+                                ? "bg-emerald-400"
+                                : "bg-red-400"
+                            }`}
+                          />
+                          <div className="font-semibold text-neutral-100">
+                            {quizEvaluation.assessment ||
+                              (quizEvaluation.correct
+                                ? "Great job!"
+                                : "Keep practicing.")}
+                          </div>
+                          <div className="ml-auto text-sm text-neutral-400">
+                            Score: {(quizEvaluation.score * 100).toFixed(0)}%
+                          </div>
+                        </div>
+                        {quizEvaluation.good_points.length > 0 &&
+                          quizQuestion.question_type === "short_answer" && (
+                            <div>
+                              <div className="text-xs font-semibold uppercase tracking-wide text-emerald-300">
+                                Good points
+                              </div>
+                              <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-neutral-200">
+                                {quizEvaluation.good_points.map(
+                                  (point, idx) => (
+                                    <li key={`good-${idx}`}>{point}</li>
+                                  )
+                                )}
+                              </ul>
+                            </div>
+                          )}
+                        {quizEvaluation.bad_points.length > 0 &&
+                          quizQuestion.question_type === "short_answer" && (
+                            <div>
+                              <div className="text-xs font-semibold uppercase tracking-wide text-red-300">
+                                Needs work
+                              </div>
+                              <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-neutral-200">
+                                {quizEvaluation.bad_points.map((point, idx) => (
+                                  <li key={`bad-${idx}`}>{point}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        <div className="rounded-lg bg-neutral-900 px-3 py-2 text-sm text-neutral-300">
+                          <div className="text-xs uppercase tracking-wide text-neutral-500">
+                            Explanation
+                          </div>
+                          <div>{quizQuestion.answer_explanation}</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center rounded-xl border border-dashed border-neutral-700 py-12 text-neutral-400">
+                    Ready for your next question?
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* HUD */}
       {phase !== "idle" && phase !== "done" && (
         <ProgressHUD
@@ -663,6 +1316,95 @@ export default function ChatPage() {
           details={validationModal.details}
           onClose={() => setValidationModal(null)}
         />
+      )}
+
+      {quizSummaryVisible && quizSummary && (
+        <div className="fixed bottom-6 right-6 z-40 w-full max-w-md rounded-2xl border border-neutral-800 bg-neutral-950/95 p-5 shadow-2xl backdrop-blur">
+          <div className="flex items-start gap-3">
+            <div>
+              <h3 className="text-lg font-semibold text-neutral-100">
+                Quiz session summary
+              </h3>
+              <p className="text-sm text-neutral-400">
+                Here&rsquo;s a quick look at how you did this round.
+              </p>
+            </div>
+            <button
+              onClick={() => setQuizSummaryVisible(false)}
+              className="ml-auto rounded-full border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+            >
+              Dismiss
+            </button>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-4">
+            <div className="rounded-lg border border-neutral-800 bg-neutral-900/70 p-3">
+              <div className="text-xs uppercase tracking-wide text-neutral-500">
+                Questions attempted
+              </div>
+              <div className="mt-1 text-2xl font-semibold text-neutral-100">
+                {quizSummary.attempted}
+              </div>
+            </div>
+            <div className="rounded-lg border border-neutral-800 bg-neutral-900/70 p-3">
+              <div className="text-xs uppercase tracking-wide text-neutral-500">
+                Average score
+              </div>
+              <div className="mt-1 text-2xl font-semibold text-neutral-100">
+                {(quizSummary.averageScore * 100).toFixed(0)}%
+              </div>
+              <div className="text-[11px] text-neutral-500">
+                {quizSummary.correctCount} correct
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-3 text-sm text-neutral-200">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                Improvement tips
+              </div>
+              {quizSummary.improvementTips.length ? (
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {quizSummary.improvementTips.map((tip, idx) => (
+                    <li key={`improve-${idx}`}>{tip}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+                  No major gaps spotted—nice work!
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                Suggested readings & references
+              </div>
+              <ul className="mt-1 list-disc space-y-1 pl-5">
+                {quizSummary.suggestedReadings.map((ref, idx) => (
+                  <li key={`ref-${idx}`}>{ref}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                Topics covered this session
+              </div>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {quizSummary.topicsCovered.map((topic, idx) => (
+                  <span
+                    key={`topic-${idx}`}
+                    className="rounded-full border border-neutral-800 bg-neutral-900/70 px-3 py-1 text-xs text-neutral-300"
+                  >
+                    {topic}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Source modal */}
@@ -770,10 +1512,15 @@ function ValidationWarningModal({
               const label = labelFromMeta(h.metadata) || h.tag;
               const filename = h.metadata?.filename;
               return (
-                <li key={idx} className="border border-neutral-800 rounded-lg p-2">
+                <li
+                  key={idx}
+                  className="border border-neutral-800 rounded-lg p-2"
+                >
                   <div className="font-medium text-neutral-100">{label}</div>
                   {filename && (
-                    <div className="text-xs text-neutral-400">File: {filename}</div>
+                    <div className="text-xs text-neutral-400">
+                      File: {filename}
+                    </div>
                   )}
                   <div className="text-xs text-neutral-400 line-clamp-3 mt-1">
                     {h.text}
@@ -1023,7 +1770,11 @@ function ChatTurn({
       : null;
   const maxAttemptsDisplay =
     factCheck?.max_attempts ??
-    (factAttempts.length ? factAttempts.length : factCheck ? factCheck.retry_count + 1 : 1);
+    (factAttempts.length
+      ? factAttempts.length
+      : factCheck
+      ? factCheck.retry_count + 1
+      : 1);
 
   return (
     <div className="flex">
@@ -1048,26 +1799,33 @@ function ChatTurn({
             {factCheck.status === "passed" ? (
               <div className="text-[11px] text-green-300">
                 Passed fact checks
-                {confidencePct !== null && ` · LLM confidence ${confidencePct}%`}
+                {confidencePct !== null &&
+                  ` · LLM confidence ${confidencePct}%`}
                 {entailmentPct !== null && (
                   <>
-                    {" "}· Evidence entailment {entailmentPct}%
-                    {entailedClaims !== null && totalClaims !== null &&
+                    {" "}
+                    · Evidence entailment {entailmentPct}%
+                    {entailedClaims !== null &&
+                      totalClaims !== null &&
                       ` (${entailedClaims}/${totalClaims} claims)`}
-                    {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
+                    {entailmentTarget !== null &&
+                      ` · target ${entailmentTarget}%`}
                   </>
                 )}
               </div>
             ) : (
               <div className="text-[11px] text-yellow-300">
                 Failed validation after {maxAttemptsDisplay} attempts.
-                {factCheck.message ? ` ${factCheck.message}` : " Answer may be unreliable."}
+                {factCheck.message
+                  ? ` ${factCheck.message}`
+                  : " Answer may be unreliable."}
               </div>
             )}
             {factCheck.status !== "passed" && entailmentPct !== null && (
               <div className="text-[11px] text-neutral-400 mt-1">
                 Evidence entailment {entailmentPct}%
-                {entailedClaims !== null && totalClaims !== null &&
+                {entailedClaims !== null &&
+                  totalClaims !== null &&
                   ` (${entailedClaims}/${totalClaims} claims)`}
                 {entailmentTarget !== null && ` · target ${entailmentTarget}%`}
               </div>
@@ -1078,11 +1836,13 @@ function ChatTurn({
                 {factCheck.retry_count === 1 ? "retry" : "retries"}.
               </div>
             )}
-            {factCheck.status !== "passed" && failingSnippet && failingLabel && (
-              <div className="text-[11px] text-red-300 mt-1">
-                Key issue: “{failingSnippet}” → {failingLabel}
-              </div>
-            )}
+            {factCheck.status !== "passed" &&
+              failingSnippet &&
+              failingLabel && (
+                <div className="text-[11px] text-red-300 mt-1">
+                  Key issue: “{failingSnippet}” → {failingLabel}
+                </div>
+              )}
           </div>
         )}
 
