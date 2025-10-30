@@ -26,7 +26,6 @@ import {
   saveActiveChatId,
   createChat,
   appendMessage,
-  replaceMessages,
   renameChat,
   deleteChat,
 } from "@/lib/chat";
@@ -202,9 +201,10 @@ function resolveFileUrl(raw: unknown): string | null {
   }
 
   const backend = backendBase();
-  const base = backend && backend.trim()
-    ? backend
-    : typeof window !== "undefined" && window.location?.origin
+  const base =
+    backend && backend.trim()
+      ? backend
+      : typeof window !== "undefined" && window.location?.origin
       ? window.location.origin
       : "";
   if (!base) return trimmed;
@@ -213,9 +213,7 @@ function resolveFileUrl(raw: unknown): string | null {
     return new URL(trimmed, base).toString();
   } catch (err) {
     const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
-    const normalizedPath = trimmed.startsWith("/")
-      ? trimmed
-      : `/${trimmed}`;
+    const normalizedPath = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
     return `${normalizedBase}${normalizedPath}`;
   }
 }
@@ -371,7 +369,9 @@ function buildDocumentHtml({
     ? `<div class="status">Located chunk variant automatically.</div>`
     : `<div class="status status--warn">Could not auto-locate the chunk. Showing full document for manual review.</div>`;
   const variantInfo = match
-    ? `<div class="variant">Matched variant: <code>${escapeHtml(match.query)}</code></div>`
+    ? `<div class="variant">Matched variant: <code>${escapeHtml(
+        match.query
+      )}</code></div>`
     : "";
   return `<!DOCTYPE html>
   <html lang="en">
@@ -1225,11 +1225,7 @@ export default function ChatPage() {
             ) : (
               <div className="space-y-5">
                 {messages.map((m, i) => (
-                  <ChatTurn
-                    key={i}
-                    msg={m}
-                    onOpenCitation={openCitation}
-                  />
+                  <ChatTurn key={i} msg={m} onOpenCitation={openCitation} />
                 ))}
               </div>
             )}
