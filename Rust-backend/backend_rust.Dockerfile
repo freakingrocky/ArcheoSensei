@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM rust:1.79 as builder
 WORKDIR /app
-COPY Rust-backend/ ./Rust-backend
+COPY ./ ./Rust-backend
 WORKDIR /app/Rust-backend
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 RUN cargo build --release
