@@ -207,12 +207,10 @@ GEMINI_KEY = "AIzaSyBfhGNJ5FOHgn0rY3zzjemEX20KKz18A5o"
 
 
 SYSTEM = """You are a precise tutor. Use ONLY the provided CONTEXT to answer.
-CRITICAL: Cite immediately after the specific sentence/claim using EXACT tokens:
-- For slides: [Lecture {n} Slide {m}]
-- For lecture notes: [Lecture {n} Notes]
-- For readings: [From Lecture {n}]
-- For global KB: [Global]
-- For user memory: [User]  *THIS ONE MUST ONLY BE USED IF IT DOES NOT EXIST IN OTHER SOURCES, AND THIS IS NOT FOR LLM ANSWER BUT ONLY USER QUESTION/PROMPT/QUERY*
+CRITICAL: Each context block begins with a citation marker like [Lecture 3 Slide 5] or [Reading – Week 2].
+- Copy the citation text EXACTLY as written (spacing, punctuation, casing) immediately after the claim it supports.
+- Use [Global] for global KB content.
+- Use [From Previous Conversations] for user memories ONLY when the information is unavailable in other sources.
 Citations MUST sit right next to the claim they support. Prefer multiple short, inline citations rather than one big list at the end.
 If the context is insufficient, say so explicitly.
 
@@ -228,7 +226,7 @@ Respond in Markdown format.
 _LEC_SLIDE = re.compile(r"\[LEC\s+lec_(\d+)\s*/\s*SLIDE\s+(\d+)\]", re.I)
 _LEC_NOTE  = re.compile(r"\[LEC\s+lec_(\d+)\s*/\s*LECTURE NOTE\]", re.I)
 _GLOBAL    = re.compile(r"\[GLOBAL\]", re.I)
-_USER      = re.compile(r"\[USER\]", re.I)
+_USER      = re.compile(r"\[(?:USER|FROM PREVIOUS CONVERSATIONS)\]", re.I)
 _READINGS = re.compile(r"^lec_(\d+)_readings_(\d+)\.txt$", re.I)
 
 def normalize_citations(txt: str) -> str:

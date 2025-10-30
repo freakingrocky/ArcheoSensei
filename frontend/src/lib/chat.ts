@@ -1,5 +1,13 @@
 // frontend/src/lib/chats.ts
-export type Hit = { tag: string; score: number; metadata: any; text: string };
+export type Hit = {
+  id: string | number;
+  tag: string;
+  score: number;
+  metadata: any;
+  text: string;
+  citation?: string | null;
+  file_url?: string | null;
+};
 export type FactCheckAttempt = {
   attempt: number;
   needs_retry: boolean;
