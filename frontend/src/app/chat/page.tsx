@@ -57,6 +57,45 @@ function backendBase() {
   ) as string;
 }
 
+function resolveFileUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // Absolute URLs (http, https, data, etc.) – use as-is
+  const ABSOLUTE_PROTOCOL = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
+  if (ABSOLUTE_PROTOCOL.test(trimmed)) {
+    return trimmed;
+  }
+
+  // Protocol-relative URLs (e.g. //example.com/file)
+  if (trimmed.startsWith("//")) {
+    const protocol =
+      typeof window !== "undefined" && window.location?.protocol
+        ? window.location.protocol
+        : "https:";
+    return `${protocol}${trimmed}`;
+  }
+
+  const backend = backendBase();
+  const base = backend && backend.trim()
+    ? backend
+    : typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin
+      : "";
+  if (!base) return trimmed;
+
+  try {
+    return new URL(trimmed, base).toString();
+  } catch (err) {
+    const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
+    const normalizedPath = trimmed.startsWith("/")
+      ? trimmed
+      : `/${trimmed}`;
+    return `${normalizedBase}${normalizedPath}`;
+  }
+}
+
 function labelFromMeta(md: any) {
   if (!md) return "";
   if (md.slide_no != null && md.lecture_key) {
@@ -701,11 +740,12 @@ export default function ChatPage() {
   async function openCitation(hit: Hit) {
     if (!hit) return;
     const meta = hit.metadata || {};
-    const directUrl =
+    const rawUrl =
       (typeof hit.file_url === "string" && hit.file_url) ||
       (typeof meta.FILE_URL === "string" && meta.FILE_URL) ||
       (typeof meta.file_url === "string" && meta.file_url) ||
       (typeof meta.fileUrl === "string" && meta.fileUrl);
+    const directUrl = resolveFileUrl(rawUrl);
     if (!directUrl) {
       await openSourceByMeta(meta);
       return;
@@ -714,7 +754,11 @@ export default function ChatPage() {
     try {
       const res = await fetch(directUrl, { cache: "no-store" });
       if (!res.ok) {
-        throw new Error(`Failed to fetch source (${res.status})`);
+        const win = window.open(directUrl, "_blank", "noopener");
+        if (!win) {
+          throw new Error(`Failed to fetch source (${res.status})`);
+        }
+        return;
       }
       const contentType = (res.headers.get("content-type") || "").toLowerCase();
       const isText =
@@ -723,18 +767,7 @@ export default function ChatPage() {
         directUrl.toLowerCase().endsWith(".md");
 
       if (!isText) {
-        const blob = await res.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const win = window.open(blobUrl, "_blank", "noopener");
-        if (win) {
-          win.addEventListener(
-            "load",
-            () => URL.revokeObjectURL(blobUrl),
-            { once: true }
-          );
-        } else {
-          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-        }
+        window.open(directUrl, "_blank", "noopener");
         return;
       }
 
@@ -763,10 +796,13 @@ export default function ChatPage() {
       }
     } catch (err) {
       console.error("Failed to open citation", err);
-      const opened = window.open(directUrl, "_blank", "noopener");
-      if (!opened) {
-        await openSourceByMeta(meta);
+      if (directUrl) {
+        const opened = window.open(directUrl, "_blank", "noopener");
+        if (opened) {
+          return;
+        }
       }
+      await openSourceByMeta(meta);
     }
   }
 
