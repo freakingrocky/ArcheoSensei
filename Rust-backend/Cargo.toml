@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "json", "chrono"] }
 pgvector = { version = "0.4", features = ["sqlx", "serde"] }
 fastembed = { version = "5.2.0", default-features = false, features = ["hf-hub-rustls-tls", "online", "ort-download-binaries"] }
+image = { version = "=0.25.4", default-features = false }
 futures = "0.3"
 parking_lot = "0.12"
 dashmap = "5"
@@ -47,5 +48,3 @@ reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip",
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 insta = { version = "1", features = ["json"] }
 
-[patch.crates-io]
-pxfm = { path = "vendor/pxfm" }
