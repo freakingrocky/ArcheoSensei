@@ -1,0 +1,48 @@
+[package]
+name = "rust-backend"
+version = "0.1.0"
+edition = "2021"
+description = "Rust implementation of the ArcheoSensei backend"
+authors = ["ArcheoSensei Team"]
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros", "json", "multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip", "brotli", "deflate", "blocking", "rustls-tls"] }
+dotenvy = "0.15"
+config = { version = "0.14", features = ["json", "toml"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "json", "chrono"] }
+pgvector = { version = "0.4", features = ["sqlx", "serde"] }
+futures = "0.3"
+parking_lot = "0.12"
+dashmap = "5"
+strum = { version = "0.26", features = ["derive"] }
+regex = "1"
+rand = "0.8"
+base64 = "0.22"
+bytes = "1"
+mime = "0.3"
+lazy_static = "1"
+async-stream = "0.3"
+http = "1"
+tokio-util = { version = "0.7", features = ["io"] }
+smallvec = "1"
+float-ord = "0.3"
+blake3 = "1"
+
+[dev-dependencies]
+axum-test = "15"
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip", "brotli", "deflate", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+insta = { version = "1", features = ["json"] }
