@@ -22,6 +22,8 @@ use axum::{
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use tower_http::cors::CorsLayer;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -56,7 +58,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/source/:lecture_key/:slide_no", get(get_source))
         .route("/quiz/question", post(quiz_question))
         .route("/quiz/grade", post(quiz_grade))
-        .with_state(app_state);
+        .with_state(app_state)
+        .layer(CorsLayer::permissive());
 
     let listener =
         tokio::net::TcpListener::bind((settings.bind_host.as_str(), settings.port)).await?;
