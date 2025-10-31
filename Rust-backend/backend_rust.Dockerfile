@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.79 AS builder
+FROM rust:nightly AS builder
 WORKDIR /app
 COPY ./ ./Rust-backend
 WORKDIR /app/Rust-backend
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+ENV CARGO_UNSTABLE_EDITION2024=1
 RUN cargo build --release
 
 FROM debian:bookworm-slim
