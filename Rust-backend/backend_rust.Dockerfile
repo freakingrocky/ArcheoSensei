@@ -4,6 +4,8 @@ WORKDIR /app
 COPY ./ ./Rust-backend
 WORKDIR /app/Rust-backend
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN rustup toolchain install nightly
+RUN rustup default nightly
 ENV CARGO_UNSTABLE_EDITION2024=1
 RUN cargo build --release
 
