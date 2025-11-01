@@ -31,7 +31,6 @@ fn json_from_response(body: &str) -> Result<Value> {
 async fn call_sig_gpt5(
     settings: &Settings,
     messages: &[Value],
-    temperature: f32,
     max_tokens: i32,
 ) -> Result<(String, LlmInfo)> {
     let base = settings
@@ -57,7 +56,6 @@ async fn call_sig_gpt5(
     let payload = json!({
         "model": deployment,
         "messages": messages,
-        "temperature": temperature,
         "max_completion_tokens": max_tokens,
     });
 
@@ -140,7 +138,7 @@ pub async fn run_fact_check_pipeline(
         json!({"role": "system", "content": system}),
         json!({"role": "user", "content": prompt}),
     ];
-    let (content, llm) = call_sig_gpt5(settings, &messages, 0.4, 1200).await?;
+    let (content, llm) = call_sig_gpt5(settings, &messages, 1200).await?;
 
     let fact_check = FactCheckResult {
         status: Some("passed".to_string()),
@@ -181,7 +179,7 @@ pub async fn generate_quiz_item(
         json!({"role": "system", "content": system}),
         json!({"role": "user", "content": prompt}),
     ];
-    let (raw, _) = call_sig_gpt5(settings, &messages, 0.6, 700).await?;
+    let (raw, _) = call_sig_gpt5(settings, &messages, 700).await?;
     let payload = json_from_response(&raw)?;
     let question = serde_json::from_value(payload)?;
     Ok(question)
@@ -219,7 +217,7 @@ pub async fn grade_quiz_answer(
         json!({"role": "system", "content": system}),
         json!({"role": "user", "content": prompt}),
     ];
-    let (raw, _) = call_sig_gpt5(settings, &messages, 0.2, 600).await?;
+    let (raw, _) = call_sig_gpt5(settings, &messages, 600).await?;
     let payload = json_from_response(&raw)?;
     let grade = serde_json::from_value(payload)?;
     Ok(grade)

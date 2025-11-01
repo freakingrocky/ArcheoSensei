@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -33,7 +34,7 @@ pub struct RetrieveDiagnostics {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RetrieveHit {
-    pub id: i64,
+    pub id: Uuid,
     pub text: String,
     pub metadata: serde_json::Value,
     pub score: f32,
