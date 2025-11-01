@@ -1,15 +1,18 @@
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict, Any
+import logging
 import random
+from typing import Any, Dict, List, Optional
+
 import orjson
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .settings import Settings, settings
-from .ingest import ingest_files
-from .retrieve import retrieve
 from .db import conn_cursor
 from .embed import embed_texts
+from .ingest import ingest_files
+from .logging_utils import APILoggingMiddleware, setup_logging
+from .retrieve import retrieve
+from .settings import Settings, settings
 from .schemas import (
     QueryRequest,
     UploadLectureRequest,
@@ -20,8 +23,12 @@ from .schemas import (
     QuizGradeRequest,
     QuizGradeResponse,
 )
-from .llm import groq_get_models, run_fact_check_pipeline, generate_quiz_item, grade_quiz_answer
+from .llm import generate_quiz_item, grade_quiz_answer, groq_get_models, run_fact_check_pipeline
 from .jobs import jobs
+
+
+setup_logging()
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title="RAG Backend", version="0.2.0")
@@ -31,6 +38,7 @@ app.add_middleware(
     CORSMiddleware, allow_origins=origins,
     allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+app.add_middleware(APILoggingMiddleware)
 
 @app.get("/health")
 def health():
@@ -234,6 +242,7 @@ def quiz_question(req: QuizQuestionRequest):
     try:
         question = generate_quiz_item(context, query or (req.lecture_key or "course material"), question_type)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Quiz question generation failed")
         raise HTTPException(status_code=500, detail=f"Failed to generate quiz question: {exc}") from exc
 
     return QuizQuestionResponse(
@@ -249,6 +258,7 @@ def quiz_grade(req: QuizGradeRequest):
     try:
         result = grade_quiz_answer(req.question.dict(), req.user_answer, req.context)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Quiz grading failed")
         raise HTTPException(status_code=500, detail=f"Failed to grade response: {exc}") from exc
 
     return QuizGradeResponse(**result)
