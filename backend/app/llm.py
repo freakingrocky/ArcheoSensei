@@ -1,14 +1,20 @@
 import json
-import os, httpx, time
-import re
-from typing import Any, Callable, Dict, List, Optional
+import logging
 import math
+import os
+import re
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+import httpx
 import numpy as np
 import torch
 
 
 from .settings import settings
 from .embed import embed_texts
+
+logger = logging.getLogger(__name__)
 
 BASE = os.environ.get("GROQ_API_BASE", "https://api.groq.com")
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -23,6 +29,8 @@ QUIZ_ALLOWED_TYPES = {
 }
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_LEADING_TAG = re.compile(r"^\[[^\]]+\]\s*")
 
 
 def _parse_structured_json(text: str) -> Dict[str, Any]:
@@ -44,6 +52,121 @@ def _ensure_list(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
     return [str(value).strip()] if str(value).strip() else []
+
+
+def _extract_focus_sentence(context: str, topic_label: str) -> str:
+    lines = [line.strip() for line in (context or "").splitlines() if line.strip()]
+    cleaned = [_LEADING_TAG.sub("", line).strip() for line in lines]
+    cleaned = [line for line in cleaned if line]
+    if cleaned:
+        joined = " ".join(cleaned)
+    else:
+        joined = ""
+    for sentence in _SENTENCE_SPLIT.split(joined):
+        candidate = sentence.strip()
+        if len(candidate) >= 20:
+            return candidate
+    if cleaned:
+        return cleaned[0]
+    return f"a key idea about {topic_label}".strip()
+
+
+def _fallback_quiz_item(context: str, topic_label: str, question_type: str) -> Dict[str, Any]:
+    focus = _extract_focus_sentence(context, topic_label)
+    statement = focus if focus.endswith(('.', '!', '?')) else f"{focus}."
+    prompt_topic = topic_label or "the course material"
+    title_topic = prompt_topic[0].upper() + prompt_topic[1:] if prompt_topic else prompt_topic
+    hint = f"Think about how the material describes {prompt_topic}."
+    explanation = f"The material explains that {statement}".strip()
+    if not explanation.endswith(('.', '!', '?')):
+        explanation = f"{explanation}."
+    rubric_focus = focus.strip()
+    if not rubric_focus.endswith(('.', '!', '?')):
+        rubric_focus = f"{rubric_focus}."
+    answer_rubric = f"Reference that {rubric_focus}".strip()
+    if not answer_rubric.endswith(('.', '!', '?')):
+        answer_rubric = f"{answer_rubric}."
+
+    if question_type == "true_false":
+        return {
+            "question_type": "true_false",
+            "question_prompt": f"True or False: {focus}",
+            "options": ["True", "False"],
+            "correct_answer": "True",
+            "answer_rubric": answer_rubric,
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+
+    if question_type == "mcq_single":
+        options = [
+            focus,
+            f"{title_topic} is presented as unrelated to the main ideas.",
+            f"The lesson claims {prompt_topic} is purely about memorizing isolated facts.",
+            f"According to the material, {prompt_topic} should be ignored by learners.",
+        ]
+        # Ensure options are unique while preserving order
+        seen = set()
+        deduped = []
+        for opt in options:
+            if opt not in seen:
+                seen.add(opt)
+                deduped.append(opt)
+        while len(deduped) < 3:
+            deduped.append(f"Consider how {prompt_topic} connects to the main ideas.")
+        return {
+            "question_type": "mcq_single",
+            "question_prompt": f"Which option best reflects how the material describes {prompt_topic}?",
+            "options": deduped,
+            "correct_answer": deduped[0],
+            "answer_rubric": answer_rubric,
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+
+    if question_type == "mcq_multi":
+        options = [
+            focus,
+            f"It emphasizes why {prompt_topic} matters within the lesson.",
+            f"{title_topic} is portrayed as unrelated to any key concept.",
+            f"The discussion downplays the importance of {prompt_topic}.",
+        ]
+        seen = set()
+        deduped = []
+        for opt in options:
+            if opt not in seen:
+                seen.add(opt)
+                deduped.append(opt)
+        while len(deduped) < 3:
+            filler = f"Connect {prompt_topic} to the central idea explained."
+            if filler not in seen:
+                deduped.append(filler)
+                seen.add(filler)
+            else:
+                deduped.append(f"Review the role of {prompt_topic} in the material.")
+        correct = [deduped[0]]
+        if len(deduped) > 1:
+            correct.append(deduped[1])
+        return {
+            "question_type": "mcq_multi",
+            "question_prompt": f"Select all statements that match the material's treatment of {prompt_topic}.",
+            "options": deduped,
+            "correct_answer": correct,
+            "answer_rubric": f"Mention the accurate statements: {', '.join(correct)}.",
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+
+    # Default to short answer fallback
+    return {
+        "question_type": "short_answer",
+        "question_prompt": f"In your own words, explain {prompt_topic} as described in the material.",
+        "options": None,
+        "correct_answer": focus,
+        "answer_rubric": answer_rubric,
+        "hint": hint,
+        "answer_explanation": explanation,
+    }
 
 
 def generate_quiz_item(context: str, topic: str, question_type: str) -> Dict[str, Any]:
@@ -85,60 +208,64 @@ def generate_quiz_item(context: str, topic: str, question_type: str) -> Dict[str
         {"role": "user", "content": prompt},
     ]
 
-    raw = call_sig_gpt5(messages, temperature=0.6, max_tokens=700)
-    payload = _parse_structured_json(raw)
+    try:
+        raw = call_sig_gpt5(messages, temperature=0.6, max_tokens=700)
+        payload = _parse_structured_json(raw)
 
-    q_type = str(payload.get("question_type", question_type)).strip().lower()
-    if q_type not in QUIZ_ALLOWED_TYPES:
-        q_type = question_type
+        q_type = str(payload.get("question_type", question_type)).strip().lower()
+        if q_type not in QUIZ_ALLOWED_TYPES:
+            q_type = question_type
 
-    question_prompt = str(payload.get("question_prompt", "")).strip()
-    if not question_prompt:
-        raise ValueError("Model did not return a question prompt")
+        question_prompt = str(payload.get("question_prompt", "")).strip()
+        if not question_prompt:
+            raise ValueError("Model did not return a question prompt")
 
-    options = payload.get("options") if isinstance(payload.get("options"), list) else None
-    if q_type in {"mcq_single", "mcq_multi"}:
-        options = [str(opt).strip() for opt in (options or []) if str(opt).strip()]
-        if len(options) < 3:
-            raise ValueError("Multiple-choice questions require at least three options")
-    elif q_type == "true_false":
-        options = ["True", "False"]
-    else:
-        options = None
+        options = payload.get("options") if isinstance(payload.get("options"), list) else None
+        if q_type in {"mcq_single", "mcq_multi"}:
+            options = [str(opt).strip() for opt in (options or []) if str(opt).strip()]
+            if len(options) < 3:
+                raise ValueError("Multiple-choice questions require at least three options")
+        elif q_type == "true_false":
+            options = ["True", "False"]
+        else:
+            options = None
 
-    correct_answer = payload.get("correct_answer")
-    if q_type == "mcq_multi":
-        answers = _ensure_list(correct_answer)
-        if not answers:
-            raise ValueError("MCQ multi questions require at least one correct answer")
-        correct_answer = answers
-    else:
-        if isinstance(correct_answer, list):
-            correct_answer = ", ".join(str(v).strip() for v in correct_answer if str(v).strip())
-        correct_answer = str(correct_answer or "").strip()
-        if not correct_answer:
-            raise ValueError("Question is missing a correct answer")
+        correct_answer = payload.get("correct_answer")
+        if q_type == "mcq_multi":
+            answers = _ensure_list(correct_answer)
+            if not answers:
+                raise ValueError("MCQ multi questions require at least one correct answer")
+            correct_answer = answers
+        else:
+            if isinstance(correct_answer, list):
+                correct_answer = ", ".join(str(v).strip() for v in correct_answer if str(v).strip())
+            correct_answer = str(correct_answer or "").strip()
+            if not correct_answer:
+                raise ValueError("Question is missing a correct answer")
 
-    hint = str(payload.get("hint", "")).strip()
-    answer_rubric = str(payload.get("answer_rubric", "")).strip()
-    explanation = str(payload.get("answer_explanation", "")).strip()
+        hint = str(payload.get("hint", "")).strip()
+        answer_rubric = str(payload.get("answer_rubric", "")).strip()
+        explanation = str(payload.get("answer_explanation", "")).strip()
 
-    if not answer_rubric:
-        answer_rubric = "Highlight the central concept referenced in the question."
-    if not hint:
-        hint = "Think about the main idea presented in the lecture."
-    if not explanation:
-        explanation = "Review the core concept discussed to understand why this answer is correct."
+        if not answer_rubric:
+            answer_rubric = "Highlight the central concept referenced in the question."
+        if not hint:
+            hint = "Think about the main idea presented in the lecture."
+        if not explanation:
+            explanation = "Review the core concept discussed to understand why this answer is correct."
 
-    return {
-        "question_type": q_type,
-        "question_prompt": question_prompt,
-        "options": options,
-        "correct_answer": correct_answer,
-        "answer_rubric": answer_rubric,
-        "hint": hint,
-        "answer_explanation": explanation,
-    }
+        return {
+            "question_type": q_type,
+            "question_prompt": question_prompt,
+            "options": options,
+            "correct_answer": correct_answer,
+            "answer_rubric": answer_rubric,
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM quiz generation failed; using fallback question")
+        return _fallback_quiz_item(safe_context, topic_label, question_type)
 
 
 def grade_quiz_answer(
