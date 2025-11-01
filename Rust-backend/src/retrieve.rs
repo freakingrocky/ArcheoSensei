@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use anyhow::Context;
 use pgvector::Vector;
 use serde_json::json;
-use sqlx::{postgres::PgRow, Row};
+use sqlx::{Row, postgres::PgRow};
+use uuid::Uuid;
 
 use crate::{
     db::DbPool,
@@ -57,7 +58,7 @@ async fn knn_lecture(
 
 fn row_to_hit(row: PgRow) -> RetrieveHit {
     RetrieveHit {
-        id: row.get::<i64, _>("id"),
+        id: row.get::<Uuid, _>("id"),
         text: row.get::<String, _>("text"),
         metadata: row.get::<serde_json::Value, _>("metadata"),
         score: row.get::<f64, _>("score") as f32,
@@ -285,7 +286,7 @@ pub async fn retrieve(
             .await?;
         for row in rows {
             let hit = RetrieveHit {
-                id: row.get("id"),
+                id: row.get::<Uuid, _>("id"),
                 text: row.get("text"),
                 metadata: row.get("metadata"),
                 score: row.get::<f64, _>("score") as f32,
@@ -325,6 +326,7 @@ pub fn build_context(hits: &[RetrieveHit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn readable_label_for_slide() {
@@ -336,7 +338,7 @@ mod tests {
     #[test]
     fn context_truncates() {
         let hit = RetrieveHit {
-            id: 1,
+            id: Uuid::nil(),
             text: "example text".to_string(),
             metadata: json!({"lecture_key": "lec_1", "slide_no": 1}),
             score: 0.9,
