@@ -4,7 +4,7 @@ services:
   backend:
     build:
       context: .
-      dockerfile: ${BACKEND_IMPL_DOCKERFILE:-docker/backend.Dockerfile}
+      dockerfile: Rust-backend/backend_rust.Dockerfile
     env_file:
       - .env
     ports:
