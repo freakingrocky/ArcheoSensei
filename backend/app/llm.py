@@ -1,8 +1,12 @@
 import json
-import os, httpx, time
-import re
-from typing import Any, Callable, Dict, List, Optional
+import logging
 import math
+import os
+import re
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+import httpx
 import numpy as np
 import torch
 
@@ -10,9 +14,318 @@ import torch
 from .settings import settings
 from .embed import embed_texts
 
+logger = logging.getLogger(__name__)
+
 BASE = os.environ.get("GROQ_API_BASE", "https://api.groq.com")
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 API_KEY = os.environ.get("GROQ_API_KEY", "")
+
+
+QUIZ_ALLOWED_TYPES = {
+    "true_false",
+    "mcq_single",
+    "mcq_multi",
+    "short_answer",
+}
+
+_JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_LEADING_TAG = re.compile(r"^\[[^\]]+\]\s*")
+
+
+def _parse_structured_json(text: str) -> Dict[str, Any]:
+    if not text:
+        raise ValueError("Empty response from model")
+    candidate = text.strip()
+    match = _JSON_FENCE.search(candidate)
+    if match:
+        candidate = match.group(1).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse JSON payload: {exc}: {candidate[:200]}") from exc
+
+
+def _ensure_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _extract_focus_sentence(context: str, topic_label: str) -> str:
+    lines = [line.strip() for line in (context or "").splitlines() if line.strip()]
+    cleaned = [_LEADING_TAG.sub("", line).strip() for line in lines]
+    cleaned = [line for line in cleaned if line]
+    if cleaned:
+        joined = " ".join(cleaned)
+    else:
+        joined = ""
+    for sentence in _SENTENCE_SPLIT.split(joined):
+        candidate = sentence.strip()
+        if len(candidate) >= 20:
+            return candidate
+    if cleaned:
+        return cleaned[0]
+    return f"a key idea about {topic_label}".strip()
+
+
+def _fallback_quiz_item(context: str, topic_label: str, question_type: str) -> Dict[str, Any]:
+    focus = _extract_focus_sentence(context, topic_label)
+    statement = focus if focus.endswith(('.', '!', '?')) else f"{focus}."
+    prompt_topic = topic_label or "the course material"
+    title_topic = prompt_topic[0].upper() + prompt_topic[1:] if prompt_topic else prompt_topic
+    hint = f"Think about how the material describes {prompt_topic}."
+    explanation = f"The material explains that {statement}".strip()
+    if not explanation.endswith(('.', '!', '?')):
+        explanation = f"{explanation}."
+    rubric_focus = focus.strip()
+    if not rubric_focus.endswith(('.', '!', '?')):
+        rubric_focus = f"{rubric_focus}."
+    answer_rubric = f"Reference that {rubric_focus}".strip()
+    if not answer_rubric.endswith(('.', '!', '?')):
+        answer_rubric = f"{answer_rubric}."
+
+    if question_type == "true_false":
+        return {
+            "question_type": "true_false",
+            "question_prompt": f"True or False: {focus}",
+            "options": ["True", "False"],
+            "correct_answer": "True",
+            "answer_rubric": answer_rubric,
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+
+    if question_type == "mcq_single":
+        options = [
+            focus,
+            f"{title_topic} is presented as unrelated to the main ideas.",
+            f"The lesson claims {prompt_topic} is purely about memorizing isolated facts.",
+            f"According to the material, {prompt_topic} should be ignored by learners.",
+        ]
+        # Ensure options are unique while preserving order
+        seen = set()
+        deduped = []
+        for opt in options:
+            if opt not in seen:
+                seen.add(opt)
+                deduped.append(opt)
+        while len(deduped) < 3:
+            deduped.append(f"Consider how {prompt_topic} connects to the main ideas.")
+        return {
+            "question_type": "mcq_single",
+            "question_prompt": f"Which option best reflects how the material describes {prompt_topic}?",
+            "options": deduped,
+            "correct_answer": deduped[0],
+            "answer_rubric": answer_rubric,
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+
+    if question_type == "mcq_multi":
+        options = [
+            focus,
+            f"It emphasizes why {prompt_topic} matters within the lesson.",
+            f"{title_topic} is portrayed as unrelated to any key concept.",
+            f"The discussion downplays the importance of {prompt_topic}.",
+        ]
+        seen = set()
+        deduped = []
+        for opt in options:
+            if opt not in seen:
+                seen.add(opt)
+                deduped.append(opt)
+        while len(deduped) < 3:
+            filler = f"Connect {prompt_topic} to the central idea explained."
+            if filler not in seen:
+                deduped.append(filler)
+                seen.add(filler)
+            else:
+                deduped.append(f"Review the role of {prompt_topic} in the material.")
+        correct = [deduped[0]]
+        if len(deduped) > 1:
+            correct.append(deduped[1])
+        return {
+            "question_type": "mcq_multi",
+            "question_prompt": f"Select all statements that match the material's treatment of {prompt_topic}.",
+            "options": deduped,
+            "correct_answer": correct,
+            "answer_rubric": f"Mention the accurate statements: {', '.join(correct)}.",
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+
+    # Default to short answer fallback
+    return {
+        "question_type": "short_answer",
+        "question_prompt": f"In your own words, explain {prompt_topic} as described in the material.",
+        "options": None,
+        "correct_answer": focus,
+        "answer_rubric": answer_rubric,
+        "hint": hint,
+        "answer_explanation": explanation,
+    }
+
+
+def generate_quiz_item(context: str, topic: str, question_type: str) -> Dict[str, Any]:
+    if question_type not in QUIZ_ALLOWED_TYPES:
+        raise ValueError(f"Unsupported quiz question type: {question_type}")
+
+    safe_context = (context or "").strip()
+    if len(safe_context) > 6500:
+        safe_context = safe_context[:6500]
+
+    topic_label = topic.strip() or "the course material"
+    instructions = (
+        "You are a helpful tutor creating a quiz question. "
+        "Craft a question that tests conceptual understanding without relying on obscure trivia. "
+        "Keep the language clear and student-friendly."
+    )
+    schema_description = (
+        "Return JSON with keys: question_type, question_prompt, options, correct_answer, "
+        "answer_rubric, hint, answer_explanation. "
+        "question_type must be one of true_false, mcq_single, mcq_multi, short_answer. "
+        "For true_false use the options ['True','False']. "
+        "For mcq_single or mcq_multi provide between 3 and 5 options. "
+        "correct_answer should be a string for true_false, mcq_single, short_answer; "
+        "for mcq_multi return an array of the correct option strings. "
+        "answer_rubric should outline the key points a good answer must include. "
+        "hint should give a gentle nudge without revealing the answer. "
+        "answer_explanation should clearly explain the correct answer in 2-4 sentences."
+    )
+
+    prompt = (
+        f"Context to ground the question (may be empty):\n{safe_context}\n\n"
+        f"Desired question type: {question_type}\n"
+        f"Focus topic or lecture: {topic_label}\n"
+        "Create one question following the schema instructions."
+    )
+
+    messages = [
+        {"role": "system", "content": instructions + " " + schema_description},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        raw = call_sig_gpt5(messages, temperature=0.6, max_tokens=700)
+        payload = _parse_structured_json(raw)
+
+        q_type = str(payload.get("question_type", question_type)).strip().lower()
+        if q_type not in QUIZ_ALLOWED_TYPES:
+            q_type = question_type
+
+        question_prompt = str(payload.get("question_prompt", "")).strip()
+        if not question_prompt:
+            raise ValueError("Model did not return a question prompt")
+
+        options = payload.get("options") if isinstance(payload.get("options"), list) else None
+        if q_type in {"mcq_single", "mcq_multi"}:
+            options = [str(opt).strip() for opt in (options or []) if str(opt).strip()]
+            if len(options) < 3:
+                raise ValueError("Multiple-choice questions require at least three options")
+        elif q_type == "true_false":
+            options = ["True", "False"]
+        else:
+            options = None
+
+        correct_answer = payload.get("correct_answer")
+        if q_type == "mcq_multi":
+            answers = _ensure_list(correct_answer)
+            if not answers:
+                raise ValueError("MCQ multi questions require at least one correct answer")
+            correct_answer = answers
+        else:
+            if isinstance(correct_answer, list):
+                correct_answer = ", ".join(str(v).strip() for v in correct_answer if str(v).strip())
+            correct_answer = str(correct_answer or "").strip()
+            if not correct_answer:
+                raise ValueError("Question is missing a correct answer")
+
+        hint = str(payload.get("hint", "")).strip()
+        answer_rubric = str(payload.get("answer_rubric", "")).strip()
+        explanation = str(payload.get("answer_explanation", "")).strip()
+
+        if not answer_rubric:
+            answer_rubric = "Highlight the central concept referenced in the question."
+        if not hint:
+            hint = "Think about the main idea presented in the lecture."
+        if not explanation:
+            explanation = "Review the core concept discussed to understand why this answer is correct."
+
+        return {
+            "question_type": q_type,
+            "question_prompt": question_prompt,
+            "options": options,
+            "correct_answer": correct_answer,
+            "answer_rubric": answer_rubric,
+            "hint": hint,
+            "answer_explanation": explanation,
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM quiz generation failed; using fallback question")
+        return _fallback_quiz_item(safe_context, topic_label, question_type)
+
+
+def grade_quiz_answer(
+    question: Dict[str, Any],
+    user_answer: Any,
+    context: str,
+) -> Dict[str, Any]:
+    safe_context = (context or "").strip()
+    if len(safe_context) > 6500:
+        safe_context = safe_context[:6500]
+
+    serialized_question = json.dumps(question, ensure_ascii=False)
+    if isinstance(user_answer, list):
+        answer_text = "\n".join(str(v).strip() for v in user_answer if str(v).strip())
+    else:
+        answer_text = str(user_answer or "").strip()
+
+    if not answer_text:
+        answer_text = "(no answer provided)"
+
+    grading_instructions = (
+        "You are grading a student's quiz response. Use the provided rubric, correct answer, and context. "
+        "Return JSON with keys: correct (boolean), score (0.0-1.0), assessment (concise summary), "
+        "good_points (array of strengths), bad_points (array of improvement areas). "
+        "Score should reflect partial credit when appropriate."
+    )
+
+    prompt = (
+        f"Context (may be empty):\n{safe_context}\n\n"
+        f"Question JSON:\n{serialized_question}\n\n"
+        f"Student answer:\n{answer_text}"
+    )
+
+    messages = [
+        {"role": "system", "content": grading_instructions},
+        {"role": "user", "content": prompt},
+    ]
+
+    raw = call_sig_gpt5(messages, temperature=0.2, max_tokens=600)
+    payload = _parse_structured_json(raw)
+
+    correct = bool(payload.get("correct"))
+    score_val = payload.get("score")
+    try:
+        score = float(score_val)
+    except (TypeError, ValueError):
+        score = 1.0 if correct else 0.0
+    score = max(0.0, min(1.0, score))
+
+    assessment = str(payload.get("assessment", "")).strip()
+    good_points = _ensure_list(payload.get("good_points"))
+    bad_points = _ensure_list(payload.get("bad_points"))
+
+    return {
+        "correct": correct,
+        "score": score,
+        "assessment": assessment or ("Strong answer." if correct else "Needs improvement."),
+        "good_points": good_points,
+        "bad_points": bad_points,
+    }
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 GEMINI_KEY = "AIzaSyBfhGNJ5FOHgn0rY3zzjemEX20KKz18A5o"
@@ -21,12 +334,10 @@ GEMINI_KEY = "AIzaSyBfhGNJ5FOHgn0rY3zzjemEX20KKz18A5o"
 
 
 SYSTEM = """You are a precise tutor. Use ONLY the provided CONTEXT to answer.
-CRITICAL: Cite immediately after the specific sentence/claim using EXACT tokens:
-- For slides: [Lecture {n} Slide {m}]
-- For lecture notes: [Lecture {n} Notes]
-- For readings: [From Lecture {n}]
-- For global KB: [Global]
-- For user memory: [User]  *THIS ONE MUST ONLY BE USED IF IT DOES NOT EXIST IN OTHER SOURCES, AND THIS IS NOT FOR LLM ANSWER BUT ONLY USER QUESTION/PROMPT/QUERY*
+CRITICAL: Each context block begins with a citation marker like [Lecture 3 Slide 5] or [Reading – Week 2].
+- Copy the citation text EXACTLY as written (spacing, punctuation, casing) immediately after the claim it supports.
+- Use [Global] for global KB content.
+- Use [From Previous Conversations] for user memories ONLY when the information is unavailable in other sources.
 Citations MUST sit right next to the claim they support. Prefer multiple short, inline citations rather than one big list at the end.
 If the context is insufficient, say so explicitly.
 
@@ -42,7 +353,7 @@ Respond in Markdown format.
 _LEC_SLIDE = re.compile(r"\[LEC\s+lec_(\d+)\s*/\s*SLIDE\s+(\d+)\]", re.I)
 _LEC_NOTE  = re.compile(r"\[LEC\s+lec_(\d+)\s*/\s*LECTURE NOTE\]", re.I)
 _GLOBAL    = re.compile(r"\[GLOBAL\]", re.I)
-_USER      = re.compile(r"\[USER\]", re.I)
+_USER      = re.compile(r"\[(?:USER|FROM PREVIOUS CONVERSATIONS)\]", re.I)
 _READINGS = re.compile(r"^lec_(\d+)_readings_(\d+)\.txt$", re.I)
 
 def normalize_citations(txt: str) -> str:
@@ -402,23 +713,10 @@ Respond in strict JSON format with keys: verdict (\"pass\" or \"fail\"),
 confidence (0.0-1.0), and rationale (string explaining the decision).
 Do not include any additional commentary outside of valid JSON."""
 
-_MNLI_MODEL = None
-_MNLI_TOKENIZER = None
-_MNLI_MODEL_NAME = "microsoft/deberta-v3-base-mnli"
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n", re.MULTILINE)
 _CITATION_RE = re.compile(r"\[[^\]]+\]")
 
-
-def _load_mnli():
-    global _MNLI_MODEL, _MNLI_TOKENIZER
-    if _MNLI_MODEL is None or _MNLI_TOKENIZER is None:
-        _MNLI_TOKENIZER = AutoTokenizer.from_pretrained(_MNLI_MODEL_NAME, token=settings.HUGGINGFACE_TOKEN or None)
-        _MNLI_MODEL = AutoModelForSequenceClassification.from_pretrained(
-            _MNLI_MODEL_NAME, token=settings.HUGGINGFACE_TOKEN or None
-        )
-        _MNLI_MODEL.eval()
-    return _MNLI_MODEL, _MNLI_TOKENIZER
 
 
 def _strip_citations(text: str) -> str:

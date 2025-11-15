@@ -3,7 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { askRAG, fetchLectures, LectureItem } from "@/lib/api";
 
-type Hit = { tag: string; score: number; metadata: any; text: string };
+type Hit = {
+  id: string | number;
+  tag: string;
+  score: number;
+  metadata: any;
+  text: string;
+  citation?: string | null;
+  file_url?: string | null;
+};
 type Msg = { role: "user" | "assistant" | "system"; content: string };
 
 const LOADING_LINES = [
@@ -155,7 +163,8 @@ export default function Chat() {
                           className="text-xs border border-neutral-800 rounded-xl p-2"
                         >
                           <div className="font-mono text-neutral-300">
-                            {h.tag} · {h.score.toFixed(3)}
+                            {(h.citation && String(h.citation).trim()) || h.tag}
+                            {` · ${h.score.toFixed(3)}`}
                           </div>
                           <div className="text-neutral-400 line-clamp-3">
                             {h.text}
