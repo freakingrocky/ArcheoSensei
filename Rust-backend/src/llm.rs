@@ -9,8 +9,9 @@ use tokio::time::Duration;
 use crate::{
     config::Settings,
     models::{
-        ClaimCheckClaim, ClaimCheckResult, FactAiCheck, FactCheckAttempt, FactCheckResult, LlmInfo,
-        LlmUsage, QuizGradeResponse, QuizQuestion,
+        ClaimCheckClaim, ClaimCheckResult, FactAiCheck, FactCheckAttempt, FactCheckResult,
+        FactProgressCallback, FactProgressEvent, LlmInfo, LlmUsage, QuizGradeResponse,
+        QuizQuestion,
     },
 };
 
@@ -125,10 +126,17 @@ pub struct FactCheckOutput {
 const MAX_CONTEXT_LEN: usize = 30_000;
 const MAX_DIRECTIVES_LEN: usize = 800;
 
+fn emit_progress(handler: &Option<FactProgressCallback>, stage: &'static str, data: Value) {
+    if let Some(callback) = handler {
+        callback(&FactProgressEvent { stage, data });
+    }
+}
+
 pub async fn run_fact_check_pipeline(
     settings: &Settings,
     query: &str,
     context: &str,
+    progress: Option<FactProgressCallback>,
 ) -> Result<FactCheckOutput> {
     let max_attempts = resolve_fact_attempts();
     let threshold = resolve_fact_threshold(settings);
@@ -137,14 +145,55 @@ pub async fn run_fact_check_pipeline(
     let mut llm_info = LlmInfo::default();
     let mut final_answer = String::new();
 
+    emit_progress(
+        &progress,
+        "pipeline_start",
+        json!({
+            "max_attempts": max_attempts,
+            "threshold": threshold,
+        }),
+    );
+
     for attempt_idx in 0..max_attempts {
+        emit_progress(
+            &progress,
+            "attempt_start",
+            json!({
+                "attempt": attempt_idx + 1,
+                "directives": directives,
+            }),
+        );
         let (answer, llm) =
             answer_with_context(settings, query, context, directives.as_deref()).await?;
         final_answer = answer;
         llm_info = llm;
 
+        emit_progress(
+            &progress,
+            "llm_result",
+            json!({
+                "attempt": attempt_idx + 1,
+                "llm": llm_info,
+            }),
+        );
         let ai_check = fact_check_with_llm(settings, query, context, &final_answer).await;
+        emit_progress(
+            &progress,
+            "fact_ai",
+            json!({
+                "attempt": attempt_idx + 1,
+                "ai_check": ai_check,
+            }),
+        );
         let claim_check = claim_check(context, &final_answer, threshold);
+        emit_progress(
+            &progress,
+            "fact_claims",
+            json!({
+                "attempt": attempt_idx + 1,
+                "claims_check": claim_check,
+            }),
+        );
 
         let needs_retry = !(ai_check.passed && claim_check.passed);
         let attempt_record = FactCheckAttempt {
@@ -157,6 +206,17 @@ pub async fn run_fact_check_pipeline(
         };
         attempts.push(attempt_record);
 
+        emit_progress(
+            &progress,
+            "attempt_complete",
+            json!({
+                "attempt": attempt_idx + 1,
+                "needs_retry": needs_retry,
+                "attempts": attempts.clone(),
+                "retry_count": attempts.len().saturating_sub(1),
+            }),
+        );
+
         if !needs_retry {
             let fact_check = FactCheckResult {
                 status: "passed".to_string(),
@@ -166,8 +226,19 @@ pub async fn run_fact_check_pipeline(
                 attempts,
                 message: None,
             };
+            let answer_value = value_if_not_blank(&final_answer);
+            emit_progress(
+                &progress,
+                "completed",
+                json!({
+                    "status": "passed",
+                    "answer": answer_value,
+                    "fact_check": fact_check.clone(),
+                    "llm": llm_info.clone(),
+                }),
+            );
             return Ok(FactCheckOutput {
-                answer: value_if_not_blank(&final_answer),
+                answer: answer_value,
                 fact_check,
                 llm: llm_info,
             });
@@ -201,9 +272,20 @@ pub async fn run_fact_check_pipeline(
         message: last_details
             .or_else(|| Some("Unable to validate answer after retries.".to_string())),
     };
+    let answer_value = value_if_not_blank(&final_answer);
+    emit_progress(
+        &progress,
+        "completed",
+        json!({
+            "status": "failed",
+            "answer": answer_value,
+            "fact_check": fact_check.clone(),
+            "llm": llm_info.clone(),
+        }),
+    );
 
     Ok(FactCheckOutput {
-        answer: value_if_not_blank(&final_answer),
+        answer: answer_value,
         fact_check,
         llm: llm_info,
     })
@@ -624,9 +706,10 @@ mod tests {
 
         let settings = test_settings(format!("http://{}", addr));
         let context = "Lecture 1 Slide 2 discusses the capital city of Italy, which is Rome.";
-        let result = run_fact_check_pipeline(&settings, "What is the capital of Italy?", context)
-            .await
-            .unwrap();
+        let result =
+            run_fact_check_pipeline(&settings, "What is the capital of Italy?", context, None)
+                .await
+                .unwrap();
 
         assert_eq!(result.fact_check.status, "passed");
         assert_eq!(result.fact_check.attempts.len(), 1);

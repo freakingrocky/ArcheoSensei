@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -184,6 +185,14 @@ impl Default for FactCheckResult {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct FactProgressEvent {
+    pub stage: &'static str,
+    pub data: serde_json::Value,
+}
+
+pub type FactProgressCallback = Arc<dyn Fn(&FactProgressEvent) + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
