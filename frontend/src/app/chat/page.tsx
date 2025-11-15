@@ -614,6 +614,9 @@ type ClaimCheckEntry = {
   context?: string;
   context_index?: number;
   label?: string;
+  entailment_probability?: number;
+  neutral_probability?: number;
+  contradiction_probability?: number;
 };
 
 function createClaimHighlighter(claims: ClaimCheckEntry[]) {
@@ -675,17 +678,107 @@ function createClaimHighlighter(claims: ClaimCheckEntry[]) {
           if (!seg.claim) {
             return { type: "text", value: seg.text };
           }
-          const verified = seg.claim.label === "entailment";
+
+          const normalizedLabel =
+            seg.claim.label?.toLowerCase().replace(/\s+/g, " ").trim() ?? "";
+          const labelStatusMap: Record<string, "verified" | "failed" | "unsure"> = {
+            entailment: "verified",
+            entailed: "verified",
+            supported: "verified",
+            support: "verified",
+            pass: "verified",
+            passed: "verified",
+            contradiction: "failed",
+            contradicted: "failed",
+            refuted: "failed",
+            refute: "failed",
+            refutes: "failed",
+            false: "failed",
+            incorrect: "failed",
+            failed: "failed",
+            "not supported": "failed",
+            unsupported: "failed",
+            rejected: "failed",
+            neutral: "unsure",
+            unknown: "unsure",
+            uncertain: "unsure",
+            "not sure": "unsure",
+            insufficient: "unsure",
+            undetermined: "unsure",
+            unresolved: "unsure",
+            unverified: "unsure",
+            "missing_topic": "unsure",
+          };
+
+          const directStatus = labelStatusMap[normalizedLabel];
+
+          const fuzzyStatus = (() => {
+            if (!normalizedLabel) return undefined;
+            if (normalizedLabel.includes("entail")) return "verified" as const;
+            if (
+              ["contradict", "refut", "false", "incorrect", "fail"].some((token) =>
+                normalizedLabel.includes(token)
+              )
+            ) {
+              return "failed" as const;
+            }
+            if (
+              [
+                "neutral",
+                "unknown",
+                "uncertain",
+                "not sure",
+                "insufficient",
+                "undetermined",
+                "unverified",
+              ].some((token) => normalizedLabel.includes(token))
+            ) {
+              return "unsure" as const;
+            }
+            return undefined;
+          })();
+
+          const probabilityStatus = (() => {
+            const probs: Array<{
+              status: "verified" | "failed" | "unsure";
+              value: number;
+            }> = [];
+            if (typeof seg.claim.entailment_probability === "number") {
+              probs.push({ status: "verified", value: seg.claim.entailment_probability });
+            }
+            if (typeof seg.claim.contradiction_probability === "number") {
+              probs.push({
+                status: "failed",
+                value: seg.claim.contradiction_probability,
+              });
+            }
+            if (typeof seg.claim.neutral_probability === "number") {
+              probs.push({ status: "unsure", value: seg.claim.neutral_probability });
+            }
+            if (!probs.length) return null;
+            return probs.reduce((prev, curr) =>
+              curr.value > prev.value ? curr : prev
+            );
+          })();
+
+          const status = directStatus ?? fuzzyStatus ?? probabilityStatus?.status ?? "unsure";
+
+          const statusClass =
+            status === "verified"
+              ? "claim-chip--verified"
+              : status === "failed"
+              ? "claim-chip--failed"
+              : "claim-chip--unsure";
+
           return {
             type: "claimHighlight",
             data: {
               hName: "span",
               hProperties: {
-                className: `claim-chip ${
-                  verified ? "claim-chip--verified" : "claim-chip--unverified"
-                }`,
+                className: `claim-chip ${statusClass}`,
                 tabIndex: 0,
                 "data-tooltip": seg.claim.context || "",
+                "data-claim-status": status,
               },
             },
             children: [{ type: "text", value: seg.text }],
