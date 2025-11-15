@@ -65,3 +65,32 @@ body {
 .claim-chip:focus-visible::after {
   opacity: 1;
 }
+
+.evidence-hover {
+  position: relative;
+}
+
+.evidence-hover[data-evidence]:not([data-evidence=""])::after {
+  content: attr(data-evidence);
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  transform: translateY(-0.4rem);
+  background: rgba(15, 23, 42, 0.96);
+  color: #f1f5f9;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.5);
+  white-space: pre-wrap;
+  max-width: min(360px, 80vw);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 40;
+}
+
+.evidence-hover[data-evidence]:not([data-evidence=""]):hover::after,
+.evidence-hover[data-evidence]:not([data-evidence=""]):focus-visible::after {
+  opacity: 1;
+}
