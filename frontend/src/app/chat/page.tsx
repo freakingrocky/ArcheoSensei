@@ -282,11 +282,29 @@ type ChunkMatch = {
   query: string;
 };
 
-type CitationViewerState = {
+type PdfChunkMatch = {
+  page: number | null;
+  queryIndex: number;
+  queries: string[];
+};
+
+type TextCitationViewerState = {
+  mode: "text";
   citation: string;
   fileUrl: string | null;
   html: string;
 };
+
+type PdfCitationViewerState = {
+  mode: "pdf";
+  citation: string;
+  fileUrl: string;
+  searchQueries: string[];
+  currentQueryIndex: number;
+  pageHint: number | null;
+};
+
+type CitationViewerState = TextCitationViewerState | PdfCitationViewerState;
 
 function escapeHtml(value: string) {
   return value
@@ -537,6 +555,70 @@ function buildDocumentHtml({
   </html>`;
 }
 
+const PDF_WORKER_SRC =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.394/pdf.worker.min.js";
+let pdfWorkerConfigured = false;
+
+function dedupeQueries(values: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    unique.push(trimmed);
+  }
+  return unique;
+}
+
+async function locateChunkInPdf(
+  data: ArrayBuffer,
+  chunk: string
+): Promise<PdfChunkMatch | null> {
+  const normalized = chunk.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  const pdfjs = await import("pdfjs-dist");
+  if (!pdfWorkerConfigured) {
+    pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER_SRC;
+    pdfWorkerConfigured = true;
+  }
+  const loadingTask = pdfjs.getDocument({ data });
+  const pdf = await loadingTask.promise;
+  try {
+    const pageTexts: string[] = [];
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const text = textContent.items
+        .map((item: any) =>
+          typeof (item as any).str === "string" ? (item as any).str : ""
+        )
+        .join(" ");
+      pageTexts.push(text.replace(/\s+/g, " ").toLowerCase());
+      page.cleanup();
+    }
+    const progressive = buildProgressiveQueries(normalized);
+    const variants = buildChunkVariants(normalized);
+    const queries = dedupeQueries([...progressive, ...variants]);
+    if (!queries.length) {
+      return { page: null, queryIndex: 0, queries };
+    }
+    for (let queryIndex = 0; queryIndex < queries.length; queryIndex++) {
+      const query = queries[queryIndex].toLowerCase();
+      if (!query) continue;
+      for (let pageIndex = 0; pageIndex < pageTexts.length; pageIndex++) {
+        if (pageTexts[pageIndex].includes(query)) {
+          return { page: pageIndex + 1, queryIndex, queries };
+        }
+      }
+    }
+    return { page: null, queryIndex: 0, queries };
+  } finally {
+    pdf.cleanup();
+    await pdf.destroy();
+  }
+}
+
 type CitationLinkProps = {
   hit?: Hit;
   onOpenCitation: (hit: Hit) => void;
@@ -544,68 +626,118 @@ type CitationLinkProps = {
 };
 
 function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
-  const [open, setOpen] = useState(false);
   const preview = useMemo(() => {
     const chunk = hit?.text;
     if (!chunk) return "";
-    const trimmed = chunk.trim();
-    if (!trimmed) return "";
-    const limit = 3200;
-    return trimmed.length > limit
-      ? `${trimmed.slice(0, limit)}…`
-      : trimmed;
+    const normalized = chunk.replace(/\s+/g, " ").trim();
+    return truncateMiddle(normalized, 520);
   }, [hit?.text]);
 
   if (!hit) {
     return <>{children}</>;
   }
 
-  const className =
-    "inline-flex items-center text-indigo-300 underline decoration-dotted " +
-    "hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 " +
-    "focus-visible:outline-offset-2 focus-visible:outline-indigo-400";
-
   const handleClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
     event.preventDefault();
-    setOpen(false);
     onOpenCitation(hit);
   };
 
-  const showPreview = open && preview;
+  return (
+    <button
+      type="button"
+      className="citation-chip citation-chip--button focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+      onClick={handleClick}
+      data-tooltip={preview || undefined}
+    >
+      <span className="citation-chip__dot" aria-hidden />
+      <span className="citation-chip__label">{children}</span>
+    </button>
+  );
+}
 
-  const openPreview = () => {
-    if (preview) {
-      setOpen(true);
-    }
-  };
-  const closePreview = () => setOpen(false);
+type PdfViewerContentProps = {
+  state: PdfCitationViewerState;
+  onSelectQuery: (index: number) => void;
+  onStepQuery: (delta: number) => void;
+};
+
+function PdfViewerContent({
+  state,
+  onSelectQuery,
+  onStepQuery,
+}: PdfViewerContentProps) {
+  const activeQuery =
+    state.searchQueries[state.currentQueryIndex] ||
+    state.searchQueries[0] ||
+    "";
+  const hashParts: string[] = [];
+  if (state.pageHint) {
+    hashParts.push(`page=${state.pageHint}`);
+  }
+  if (activeQuery) {
+    hashParts.push(`search=${encodeURIComponent(activeQuery)}`);
+  }
+  const viewerSrc = `${state.fileUrl}${
+    hashParts.length ? `#${hashParts.join("&")}` : ""
+  }`;
 
   return (
-    <span className="relative inline-flex">
-      <button
-        type="button"
-        className={className}
-        onClick={handleClick}
-        onMouseEnter={openPreview}
-        onMouseLeave={closePreview}
-        onFocus={openPreview}
-        onBlur={closePreview}
-      >
-        {children}
-      </button>
-      {showPreview && (
-        <div
-          role="tooltip"
-          onMouseEnter={openPreview}
-          onMouseLeave={closePreview}
-          className="absolute left-1/2 z-30 mt-2 w-80 -translate-x-1/2 rounded-xl border border-neutral-800 bg-neutral-900/95 p-3 text-left text-xs shadow-2xl"
-        >
-          <div className="max-h-80 overflow-y-auto whitespace-pre-wrap text-neutral-100">
-            {preview}
+    <div className="mt-4 space-y-3">
+      {state.searchQueries.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {state.searchQueries.map((query, idx) => (
+            <button
+              key={`${query}-${idx}`}
+              type="button"
+              className={`citation-search-chip ${
+                idx === state.currentQueryIndex
+                  ? "citation-search-chip--active"
+                  : ""
+              }`}
+              onClick={() => onSelectQuery(idx)}
+            >
+              {truncateMiddle(query, 80)}
+            </button>
+          ))}
+        </div>
+      )}
+      {state.searchQueries.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
+          <span>
+            Cycling through the phrases below mimics pressing Ctrl/Cmd+F until the
+            chunk is on screen.
+          </span>
+          <div className="ml-auto flex gap-2">
+            <button
+              type="button"
+              onClick={() => onStepQuery(-1)}
+              className="rounded-full border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-200 hover:bg-neutral-800"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => onStepQuery(1)}
+              className="rounded-full border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-200 hover:bg-neutral-800"
+            >
+              Next
+            </button>
           </div>
         </div>
       )}
-    </span>
+      {state.pageHint && (
+        <div className="text-[11px] text-neutral-500">
+          Jumping directly to page {state.pageHint} where we first detected the
+          supporting phrase.
+        </div>
+      )}
+      <iframe
+        key={`${viewerSrc}`}
+        title={`${state.citation} PDF viewer`}
+        src={viewerSrc}
+        className="h-[70vh] w-full rounded-xl border border-neutral-800 bg-white"
+      />
+    </div>
   );
 }
 
@@ -1255,6 +1387,38 @@ export default function ChatPage() {
 
   const closeCitationViewer = () => setCitationViewer(null);
 
+  const selectPdfQuery = (index: number) => {
+    setCitationViewer((prev) => {
+      if (!prev || prev.mode !== "pdf" || !prev.searchQueries.length) {
+        return prev;
+      }
+      const clamped = Math.min(
+        Math.max(index, 0),
+        prev.searchQueries.length - 1
+      );
+      if (clamped === prev.currentQueryIndex) {
+        return prev;
+      }
+      return { ...prev, currentQueryIndex: clamped };
+    });
+  };
+
+  const stepPdfQuery = (delta: number) => {
+    setCitationViewer((prev) => {
+      if (!prev || prev.mode !== "pdf" || !prev.searchQueries.length) {
+        return prev;
+      }
+      const clamped = Math.min(
+        Math.max(prev.currentQueryIndex + delta, 0),
+        prev.searchQueries.length - 1
+      );
+      if (clamped === prev.currentQueryIndex) {
+        return prev;
+      }
+      return { ...prev, currentQueryIndex: clamped };
+    });
+  };
+
   async function openCitation(hit: Hit) {
     if (!hit) return;
     const meta = hit.metadata || {};
@@ -1269,6 +1433,7 @@ export default function ChatPage() {
       return;
     }
 
+    const chunkText = hit.text || "";
     setCitationViewer(null);
     setCitationLoading(true);
     try {
@@ -1280,11 +1445,46 @@ export default function ChatPage() {
         }
         return;
       }
+      const citationLabel =
+        normalizeCitationLabel(hit.citation ?? "") ||
+        labelFromMeta(meta) ||
+        "Source";
       const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      const isPdf =
+        /pdf/.test(contentType) || directUrl.toLowerCase().endsWith(".pdf");
       const isText =
         /text|json|csv|markdown|html|xml/.test(contentType) ||
         directUrl.toLowerCase().endsWith(".txt") ||
         directUrl.toLowerCase().endsWith(".md");
+
+      if (isPdf) {
+        const buffer = await res.arrayBuffer();
+        const pdfMatch = await locateChunkInPdf(buffer, chunkText);
+        const combinedQueries = dedupeQueries([
+          ...(pdfMatch?.queries || []),
+          ...buildProgressiveQueries(chunkText),
+          ...buildChunkVariants(chunkText),
+        ]);
+        const fallbackQuery = chunkText
+          ? truncateMiddle(chunkText, 80)
+          : citationLabel || "Source";
+        const searchQueries = combinedQueries.length
+          ? combinedQueries
+          : [fallbackQuery];
+        const safeIndex = Math.min(
+          Math.max(pdfMatch?.queryIndex ?? 0, 0),
+          searchQueries.length - 1
+        );
+        setCitationViewer({
+          mode: "pdf",
+          citation: citationLabel,
+          fileUrl: directUrl,
+          searchQueries,
+          currentQueryIndex: safeIndex < 0 ? 0 : safeIndex,
+          pageHint: pdfMatch?.page ?? null,
+        });
+        return;
+      }
 
       if (!isText) {
         window.open(directUrl, "_blank", "noopener");
@@ -1292,19 +1492,16 @@ export default function ChatPage() {
       }
 
       const text = await res.text();
-      const match = findChunkMatch(text, hit.text || "");
-      const citationLabel =
-        normalizeCitationLabel(hit.citation ?? "") ||
-        labelFromMeta(meta) ||
-        "Source";
+      const match = findChunkMatch(text, chunkText);
       const html = buildDocumentHtml({
         citation: citationLabel,
         fileUrl: directUrl,
         docText: text,
         match,
-        chunk: hit.text || "",
+        chunk: chunkText,
       });
       setCitationViewer({
+        mode: "text",
         citation: citationLabel,
         fileUrl: directUrl,
         html,
@@ -1908,6 +2105,11 @@ export default function ChatPage() {
                     {citationViewer.fileUrl}
                   </div>
                 )}
+                <div className="mt-2 text-[11px] text-neutral-400">
+                  {citationViewer.mode === "pdf"
+                    ? "Embedded PDF viewer with auto-search powered by the supporting chunk."
+                    : "Text source rendered inline with the matching snippet highlighted."}
+                </div>
               </div>
               <div className="flex gap-2">
                 {citationViewer.fileUrl && (
@@ -1928,11 +2130,19 @@ export default function ChatPage() {
                 </button>
               </div>
             </div>
-            <iframe
-              title="Citation source preview"
-              srcDoc={citationViewer.html}
-              className="mt-4 h-[70vh] w-full rounded-xl border border-neutral-800 bg-black"
-            />
+            {citationViewer.mode === "pdf" ? (
+              <PdfViewerContent
+                state={citationViewer}
+                onSelectQuery={selectPdfQuery}
+                onStepQuery={stepPdfQuery}
+              />
+            ) : (
+              <iframe
+                title="Citation source preview"
+                srcDoc={citationViewer.html}
+                className="mt-4 h-[70vh] w-full rounded-xl border border-neutral-800 bg-black"
+              />
+            )}
           </div>
         </div>
       )}
@@ -2391,9 +2601,10 @@ function ChatTurn({
               Sources
             </div>
             <p className="text-[11px] text-neutral-400 mb-2">
-              Click a citation in the answer or below to open the source in a popup.
-              We automatically run a Ctrl/Cmd+F style search on the lecture file so
-              you can verify the quote in context instantly.
+              Click a highlighted citation to open an in-page viewer. We load PDFs
+              or text files right here and auto-run a Ctrl/Cmd+F style search using
+              the exact chunk that supported the answer so you can verify the
+              evidence quickly.
             </p>
             <div className="space-y-2">
               {hits.map((h, idx) => (
@@ -2402,14 +2613,23 @@ function ChatTurn({
                   type="button"
                   className="w-full text-left text-xs border border-neutral-800 rounded-xl p-2 hover:bg-neutral-800/40"
                   onClick={() => onOpenCitation(h)}
-                  title={
-                    h.text ? h.text.replace(/\s+/g, " ").trim() : undefined
-                  }
                 >
-                  <div className="font-mono text-neutral-300">
-                    {(h.citation && normalizeCitationLabel(h.citation)) ||
-                      labelFromMeta(h.metadata) ||
-                      "Context"}
+                  <div className="font-mono text-neutral-300 mb-1">
+                    <span
+                      className="citation-chip"
+                      data-tooltip={
+                        h.text
+                          ? truncateMiddle(
+                              h.text.replace(/\s+/g, " ").trim(),
+                              520
+                            )
+                          : undefined
+                      }
+                    >
+                      {(h.citation && normalizeCitationLabel(h.citation)) ||
+                        labelFromMeta(h.metadata) ||
+                        "Context"}
+                    </span>
                   </div>
                   <div className="text-neutral-400 line-clamp-3">{h.text}</div>
                 </button>

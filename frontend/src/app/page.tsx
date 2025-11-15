@@ -169,8 +169,9 @@ export default function Chat() {
                       Sources
                     </div>
                     <p className="text-[11px] text-neutral-400 mb-2">
-                      Click any citation inside the answer to open a popup that auto-searches
-                      the lecture using the same snippet so you can verify it quickly.
+                      Click any highlighted citation to open an in-page viewer that auto-runs
+                      Ctrl/Cmd+F searches inside the PDF or transcript using the exact
+                      snippet that supported the answer.
                     </p>
                     <div className="space-y-2 max-h-[35vh] overflow-auto">
                       {hits.map((h, idx) => (
@@ -178,9 +179,18 @@ export default function Chat() {
                           key={idx}
                           className="text-xs border border-neutral-800 rounded-xl p-2"
                         >
-                          <div className="font-mono text-neutral-300">
-                            {(h.citation && formatCitationLabel(h.citation)) ||
-                              "Context"}
+                          <div className="font-mono text-neutral-300 mb-1">
+                            <span
+                              className="citation-chip"
+                              data-tooltip={
+                                h.text
+                                  ? h.text.replace(/\s+/g, " ").trim()
+                                  : undefined
+                              }
+                            >
+                              {(h.citation && formatCitationLabel(h.citation)) ||
+                                "Context"}
+                            </span>
                           </div>
                           <div className="text-neutral-400 line-clamp-3">
                             {h.text}
