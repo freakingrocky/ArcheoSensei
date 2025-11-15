@@ -41,6 +41,7 @@ http = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 smallvec = "1"
 float-ord = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 axum-test = "15"

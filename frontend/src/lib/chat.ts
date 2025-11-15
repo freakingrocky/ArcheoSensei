@@ -11,7 +11,7 @@ export type Hit = {
 export type FactCheckAttempt = {
   attempt: number;
   needs_retry: boolean;
-  directives: string;
+  directives?: string | null;
   ai_check: {
     passed: boolean;
     confidence: number;
@@ -32,6 +32,10 @@ export type FactCheckAttempt = {
       entailment_probability: number;
       neutral_probability: number;
       contradiction_probability: number;
+      topic_index?: number;
+      topic_share_context?: number;
+      topic_share_answer?: number;
+      max_cos_to_answer?: number;
     }[];
     details?: string;
   };

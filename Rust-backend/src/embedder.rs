@@ -1,7 +1,8 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use parking_lot::Mutex;
 use tokio::task;
@@ -48,6 +49,18 @@ impl Embedder {
         })
         .await??;
         Ok(embeddings)
+    }
+}
+
+#[async_trait]
+pub trait SentenceEmbedder: Send + Sync {
+    async fn embed_strings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+
+#[async_trait]
+impl SentenceEmbedder for Embedder {
+    async fn embed_strings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts.iter().map(|s| s.as_str())).await
     }
 }
 
