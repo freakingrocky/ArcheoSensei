@@ -174,20 +174,10 @@ fn build_context_from_hits(hits: &[RetrieveHit]) -> String {
             .tag
             .clone()
             .unwrap_or_else(|| tag_for_hit(hit, citation.as_deref()));
-        let metadata = hit.metadata.as_object().cloned().unwrap_or_default();
-        let filename = metadata
-            .get("filename")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let file_hint = if filename.is_empty() {
-            String::new()
-        } else {
-            format!(" [FILE {}]", filename)
-        };
         let block = if snippet.is_empty() {
-            format!("{}{}", tag, file_hint)
+            tag.clone()
         } else {
-            format!("{}{}\n{}", tag, file_hint, snippet)
+            format!("{}\n{}", tag, snippet)
         };
         if total + block.len() > 30_000 {
             break;

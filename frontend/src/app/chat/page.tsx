@@ -279,6 +279,12 @@ type ChunkMatch = {
   query: string;
 };
 
+type CitationViewerState = {
+  citation: string;
+  fileUrl: string | null;
+  html: string;
+};
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, "&amp;")
@@ -286,6 +292,26 @@ function escapeHtml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function buildProgressiveQueries(chunk: string): string[] {
+  const normalized = chunk.trim().replace(/\s+/g, " ");
+  if (!normalized) return [];
+  const words = normalized.split(" ").filter(Boolean);
+  if (!words.length) return [];
+  const minWindow = Math.min(10, words.length);
+  const queries: string[] = [];
+  const seen = new Set<string>();
+  for (let size = minWindow; size <= words.length; size += 1) {
+    const segment = words.slice(0, size).join(" ").trim();
+    if (!segment || seen.has(segment)) continue;
+    queries.push(segment);
+    seen.add(segment);
+  }
+  if (!seen.has(normalized)) {
+    queries.push(normalized);
+  }
+  return queries;
 }
 
 function buildChunkVariants(chunk: string): string[] {
@@ -314,23 +340,36 @@ function buildChunkVariants(chunk: string): string[] {
     .sort((a, b) => b.length - a.length);
 }
 
+function locateVariant(normalizedDoc: string, variant: string): ChunkMatch | null {
+  const escaped = escapeRegExp(variant);
+  if (!escaped) return null;
+  const pattern = escaped.replace(/\\s+/g, "\\s+");
+  const regex = new RegExp(pattern, "i");
+  const match = regex.exec(normalizedDoc);
+  if (!match || typeof match.index !== "number") {
+    return null;
+  }
+  return {
+    start: match.index,
+    end: match.index + match[0].length,
+    matched: match[0],
+    query: variant,
+  };
+}
+
 function findChunkMatch(docText: string, chunk: string): ChunkMatch | null {
   const normalizedDoc = docText.replace(/\r\n/g, "\n");
-  const variants = buildChunkVariants(chunk);
+  const normalizedChunk = chunk.replace(/\s+/g, " ").trim();
+  if (!normalizedChunk) return null;
+  const progressive = buildProgressiveQueries(normalizedChunk);
+  for (const variant of progressive) {
+    const match = locateVariant(normalizedDoc, variant);
+    if (match) return match;
+  }
+  const variants = buildChunkVariants(normalizedChunk);
   for (const variant of variants) {
-    const escaped = escapeRegExp(variant);
-    if (!escaped) continue;
-    const pattern = escaped.replace(/\\s+/g, "\\s+");
-    const regex = new RegExp(pattern, "i");
-    const match = regex.exec(normalizedDoc);
-    if (match && typeof match.index === "number") {
-      return {
-        start: match.index,
-        end: match.index + match[0].length,
-        matched: match[0],
-        query: variant,
-      };
-    }
+    const match = locateVariant(normalizedDoc, variant);
+    if (match) return match;
   }
   return null;
 }
@@ -425,7 +464,7 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
     if (!chunk) return "";
     const trimmed = chunk.trim();
     if (!trimmed) return "";
-    const limit = 1500;
+    const limit = 3200;
     return trimmed.length > limit
       ? `${trimmed.slice(0, limit)}…`
       : trimmed;
@@ -475,7 +514,7 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
           onMouseLeave={closePreview}
           className="absolute left-1/2 z-30 mt-2 w-80 -translate-x-1/2 rounded-xl border border-neutral-800 bg-neutral-900/95 p-3 text-left text-xs shadow-2xl"
         >
-          <div className="max-h-60 overflow-y-auto whitespace-pre-wrap text-neutral-100">
+          <div className="max-h-80 overflow-y-auto whitespace-pre-wrap text-neutral-100">
             {preview}
           </div>
         </div>
@@ -641,6 +680,8 @@ export default function ChatPage() {
     text: string;
     image_url: string;
   } | null>(null);
+  const [citationViewer, setCitationViewer] = useState<CitationViewerState | null>(null);
+  const [citationLoading, setCitationLoading] = useState(false);
 
   // HUD
   const [phase, setPhase] = useState<Phase>("idle");
@@ -1126,6 +1167,8 @@ export default function ChatPage() {
     setPopupSource(data);
   }
 
+  const closeCitationViewer = () => setCitationViewer(null);
+
   async function openCitation(hit: Hit) {
     if (!hit) return;
     const meta = hit.metadata || {};
@@ -1140,6 +1183,8 @@ export default function ChatPage() {
       return;
     }
 
+    setCitationViewer(null);
+    setCitationLoading(true);
     try {
       const res = await fetch(directUrl, { cache: "no-store" });
       if (!res.ok) {
@@ -1173,16 +1218,11 @@ export default function ChatPage() {
         match,
         chunk: hit.text || "",
       });
-      const popup = window.open("", "_blank", "noopener");
-      if (popup) {
-        popup.document.write(html);
-        popup.document.close();
-      } else {
-        const blob = new Blob([html], { type: "text/html" });
-        const url = URL.createObjectURL(blob);
-        window.open(url, "_blank", "noopener");
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-      }
+      setCitationViewer({
+        citation: citationLabel,
+        fileUrl: directUrl,
+        html,
+      });
     } catch (err) {
       console.error("Failed to open citation", err);
       if (directUrl) {
@@ -1192,6 +1232,8 @@ export default function ChatPage() {
         }
       }
       await openSourceByMeta(meta);
+    } finally {
+      setCitationLoading(false);
     }
   }
 
@@ -1744,6 +1786,67 @@ export default function ChatPage() {
                 ))}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {citationLoading && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-200">
+            Loading citation…
+          </div>
+        </div>
+      )}
+
+      {citationViewer && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={closeCitationViewer}
+        >
+          <div
+            className="w-full max-w-5xl rounded-2xl border border-neutral-800 bg-neutral-900 p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-xs uppercase tracking-wide text-neutral-500">
+                  Citation
+                </div>
+                <div className="text-lg font-semibold text-white">
+                  {citationViewer.citation}
+                </div>
+                {citationViewer.fileUrl && (
+                  <div className="mt-1 break-all text-xs text-neutral-400">
+                    {citationViewer.fileUrl}
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2">
+                {citationViewer.fileUrl && (
+                  <a
+                    href={citationViewer.fileUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg border border-neutral-700 px-3 py-1 text-sm text-neutral-200 hover:bg-neutral-800"
+                  >
+                    Open original
+                  </a>
+                )}
+                <button
+                  onClick={closeCitationViewer}
+                  className="rounded-lg border border-neutral-700 px-3 py-1 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <iframe
+              title="Citation source preview"
+              srcDoc={citationViewer.html}
+              className="mt-4 h-[70vh] w-full rounded-xl border border-neutral-800 bg-black"
+            />
           </div>
         </div>
       )}

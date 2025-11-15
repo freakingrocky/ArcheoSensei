@@ -1,12 +1,13 @@
 use anyhow::Result;
 use axum::{
+    Json,
     extract::{Multipart, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::Row;
+use std::sync::Arc;
 use tokio::task;
 use tracing::error;
 
@@ -18,9 +19,9 @@ use crate::{
     jobs::{JobManager, JobRecord},
     llm::{self, FactCheckOutput},
     models::{
-        AsyncJobResponse, HealthResponse, MemorizeRequest, QueryOptions, QueryRequest,
-        QueryResponse, QuizGradeRequest, QuizGradeResponse, QuizQuestionRequest,
-        QuizQuestionResponse, RetrieveResult,
+        AsyncJobResponse, FactProgressCallback, FactProgressEvent, HealthResponse, MemorizeRequest,
+        QueryOptions, QueryRequest, QueryResponse, QuizGradeRequest, QuizGradeResponse,
+        QuizQuestionRequest, QuizQuestionResponse, RetrieveResult,
     },
     retrieve,
 };
@@ -147,7 +148,7 @@ pub async fn query(
         answer,
         fact_check,
         llm,
-    } = llm::run_fact_check_pipeline(&state.settings, &payload.query, &context).await?;
+    } = llm::run_fact_check_pipeline(&state.settings, &payload.query, &context, None).await?;
     let response = QueryResponse {
         diagnostics,
         top_k: hits.len(),
@@ -220,8 +221,90 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             "context_len": context.len(),
         }),
     );
+    let jobs_for_progress = state.jobs.clone();
+    let job_id_for_progress = job_id.clone();
+    let progress_cb: FactProgressCallback =
+        Arc::new(move |event: &FactProgressEvent| match event.stage {
+            "pipeline_start" => {
+                let max_attempts = event
+                    .data
+                    .get("max_attempts")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let threshold = event
+                    .data
+                    .get("threshold")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                jobs_for_progress.update_job(
+                    &job_id_for_progress,
+                    json!({
+                        "max_attempts": max_attempts,
+                        "retry_count": 0usize,
+                        "threshold": threshold,
+                    }),
+                );
+            }
+            "attempt_start" => {
+                jobs_for_progress.update_job(
+                    &job_id_for_progress,
+                    json!({
+                        "phase": "llm",
+                        "fact_ai_status": Value::Null,
+                        "fact_claims_status": Value::Null,
+                    }),
+                );
+            }
+            "fact_ai" => {
+                let passed = event
+                    .data
+                    .get("ai_check")
+                    .and_then(|v| v.get("passed"))
+                    .and_then(Value::as_bool);
+                let payload = if let Some(passed) = passed {
+                    let status = if passed { "passed" } else { "failed" };
+                    json!({ "phase": "fact_ai", "fact_ai_status": status })
+                } else {
+                    json!({ "phase": "fact_ai" })
+                };
+                jobs_for_progress.update_job(&job_id_for_progress, payload);
+            }
+            "fact_claims" => {
+                let passed = event
+                    .data
+                    .get("claims_check")
+                    .and_then(|v| v.get("passed"))
+                    .and_then(Value::as_bool);
+                let payload = if let Some(passed) = passed {
+                    let status = if passed { "passed" } else { "failed" };
+                    json!({ "phase": "fact_claims", "fact_claims_status": status })
+                } else {
+                    json!({ "phase": "fact_claims" })
+                };
+                jobs_for_progress.update_job(&job_id_for_progress, payload);
+            }
+            "attempt_complete" => {
+                if let Some(attempts) = event.data.get("attempts").cloned() {
+                    let retry_count = event
+                        .data
+                        .get("retry_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default() as usize;
+                    jobs_for_progress.update_job(
+                        &job_id_for_progress,
+                        json!({
+                            "attempts": attempts,
+                            "retry_count": retry_count,
+                        }),
+                    );
+                }
+            }
+            _ => {}
+        });
 
-    match llm::run_fact_check_pipeline(&state.settings, &payload.query, &context).await {
+    match llm::run_fact_check_pipeline(&state.settings, &payload.query, &context, Some(progress_cb))
+        .await
+    {
         Ok(FactCheckOutput {
             answer,
             fact_check,
