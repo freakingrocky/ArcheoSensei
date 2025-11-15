@@ -21,6 +21,15 @@ const LOADING_LINES = [
   "Just a second, truly a confounding question…",
 ];
 
+function formatCitationLabel(raw?: string | null) {
+  if (!raw) return "";
+  const trimmed = String(raw).trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [q, setQ] = useState("");
@@ -163,7 +172,8 @@ export default function Chat() {
                           className="text-xs border border-neutral-800 rounded-xl p-2"
                         >
                           <div className="font-mono text-neutral-300">
-                            {(h.citation && String(h.citation).trim()) || h.tag}
+                            {(h.citation && formatCitationLabel(h.citation)) ||
+                              "Context"}
                             {` · ${h.score.toFixed(3)}`}
                           </div>
                           <div className="text-neutral-400 line-clamp-3">

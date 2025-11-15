@@ -232,10 +232,6 @@ function labelFromMeta(md: any) {
     const n = (md.lecture_key as string).split("_").pop();
     return `From Lecture ${n}`;
   }
-  if (md.store === "global") return "Global";
-  if (md.store === "user" || md.source === "user_note") {
-    return "From Previous Conversations";
-  }
   return "";
 }
 
@@ -260,7 +256,7 @@ function toCiteLinks(text: string, hits: Hit[]) {
   const seen = new Map<string, string>();
   for (const hit of hits) {
     if (hit == null) continue;
-    const citation = normalizeCitationLabel(hit.citation ?? hit.tag ?? "");
+    const citation = normalizeCitationLabel(hit.citation ?? "");
     const id = hit.id != null ? String(hit.id) : "";
     if (!citation || !id || seen.has(citation)) continue;
     seen.set(citation, id);
@@ -414,6 +410,78 @@ function buildDocumentHtml({
       </script>
     </body>
   </html>`;
+}
+
+type CitationLinkProps = {
+  hit?: Hit;
+  onOpenCitation: (hit: Hit) => void;
+  children: ReactNode;
+};
+
+function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
+  const [open, setOpen] = useState(false);
+  const preview = useMemo(() => {
+    const chunk = hit?.text;
+    if (!chunk) return "";
+    const trimmed = chunk.trim();
+    if (!trimmed) return "";
+    const limit = 1500;
+    return trimmed.length > limit
+      ? `${trimmed.slice(0, limit)}…`
+      : trimmed;
+  }, [hit?.text]);
+
+  if (!hit) {
+    return <>{children}</>;
+  }
+
+  const className =
+    "inline-flex items-center text-indigo-300 underline decoration-dotted " +
+    "hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 " +
+    "focus-visible:outline-offset-2 focus-visible:outline-indigo-400";
+
+  const handleClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
+    event.preventDefault();
+    setOpen(false);
+    onOpenCitation(hit);
+  };
+
+  const showPreview = open && preview;
+
+  const openPreview = () => {
+    if (preview) {
+      setOpen(true);
+    }
+  };
+  const closePreview = () => setOpen(false);
+
+  return (
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        className={className}
+        onClick={handleClick}
+        onMouseEnter={openPreview}
+        onMouseLeave={closePreview}
+        onFocus={openPreview}
+        onBlur={closePreview}
+      >
+        {children}
+      </button>
+      {showPreview && (
+        <div
+          role="tooltip"
+          onMouseEnter={openPreview}
+          onMouseLeave={closePreview}
+          className="absolute left-1/2 z-30 mt-2 w-80 -translate-x-1/2 rounded-xl border border-neutral-800 bg-neutral-900/95 p-3 text-left text-xs shadow-2xl"
+        >
+          <div className="max-h-60 overflow-y-auto whitespace-pre-wrap text-neutral-100">
+            {preview}
+          </div>
+        </div>
+      )}
+    </span>
+  );
 }
 
 type ClaimCheckEntry = {
@@ -1785,7 +1853,7 @@ function ValidationWarningModal({
               const label =
                 normalizeCitationLabel(h.citation ?? "") ||
                 labelFromMeta(h.metadata) ||
-                h.tag;
+                "Context";
               const filename = h.metadata?.filename;
               return (
                 <li
@@ -1952,24 +2020,10 @@ function ChatTurn({
                 const payload = href.slice(5);
                 const id = decodeURIComponent(payload);
                 const hit = hitsById.get(id);
-                const preview = hit?.text
-                  ? hit.text.replace(/\s+/g, " ").trim().slice(0, 400)
-                  : undefined;
                 return (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      if (hit) {
-                        onOpenCitation(hit);
-                      }
-                    }}
-                    className="inline text-indigo-300 underline decoration-dotted hover:text-indigo-200"
-                    title={preview}
-                    {...props}
-                  >
+                  <CitationLink hit={hit} onOpenCitation={onOpenCitation}>
                     {children}
-                  </button>
+                  </CitationLink>
                 );
               }
               return (
@@ -2161,7 +2215,7 @@ function ChatTurn({
                   <div className="font-mono text-neutral-300">
                     {(h.citation && normalizeCitationLabel(h.citation)) ||
                       labelFromMeta(h.metadata) ||
-                      h.tag}
+                      "Context"}
                     {` · ${h.score.toFixed(3)}`}
                   </div>
                   <div className="text-neutral-400 line-clamp-3">{h.text}</div>

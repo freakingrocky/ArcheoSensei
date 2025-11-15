@@ -139,15 +139,14 @@ fn readable_label(metadata: &serde_json::Value) -> Option<String> {
 }
 
 fn citation_from_hit(hit: &RetrieveHit) -> Option<String> {
-    if let Some(citation) = &hit.citation {
-        if !citation.trim().is_empty() {
-            return Some(citation.trim().to_string());
-        }
-    }
-    readable_label(&hit.metadata)
+    hit.citation
+        .as_ref()
+        .map(|citation| citation.trim())
+        .filter(|citation| !citation.is_empty())
+        .map(|citation| citation.to_string())
 }
 
-fn tag_for_hit(hit: &RetrieveHit, citation: Option<&str>) -> String {
+fn tag_for_hit(_hit: &RetrieveHit, citation: Option<&str>) -> String {
     if let Some(citation) = citation {
         let clean = citation.trim();
         if clean.starts_with('[') && clean.ends_with(']') {
@@ -156,21 +155,7 @@ fn tag_for_hit(hit: &RetrieveHit, citation: Option<&str>) -> String {
             format!("[{}]", clean)
         }
     } else {
-        let metadata = hit.metadata.as_object().cloned().unwrap_or_default();
-        match metadata.get("store").and_then(|v| v.as_str()) {
-            Some("global") => "[Global]".to_string(),
-            Some("user") => "[User]".to_string(),
-            _ => {
-                if let (Some(lecture), Some(slide)) =
-                    (metadata.get("lecture_key"), metadata.get("slide_no"))
-                {
-                    if let (Some(lecture), Some(slide)) = (lecture.as_str(), slide.as_i64()) {
-                        return format!("[LEC {} / SLIDE {}]", lecture, slide);
-                    }
-                }
-                "[CTX]".to_string()
-            }
-        }
+        "[CTX]".to_string()
     }
 }
 
@@ -252,7 +237,10 @@ pub async fn retrieve(
             let citation = hit
                 .citation
                 .clone()
-                .filter(|v| !v.trim().is_empty())
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                })
                 .or(default_citation);
             let tag = tag_for_hit(&hit, citation.as_deref());
             RetrieveHit {
@@ -269,7 +257,7 @@ pub async fn retrieve(
 
     if use_global {
         for hit in knn_store(pool, &qvec, 1, 10).await? {
-            let citation = citation_from_hit(&hit).or_else(|| Some("Global".to_string()));
+            let citation = citation_from_hit(&hit);
             merged.push(add_hit(hit, citation, Some("global")));
         }
     }
@@ -294,8 +282,7 @@ pub async fn retrieve(
                 file_url: None,
                 tag: None,
             };
-            let citation =
-                citation_from_hit(&hit).or_else(|| Some("From Previous Conversations".to_string()));
+            let citation = citation_from_hit(&hit);
             merged.push(add_hit(hit, citation, Some("user")));
         }
     }
