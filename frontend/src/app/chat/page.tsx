@@ -243,11 +243,18 @@ function escapeRegExp(value: string) {
 
 function normalizeCitationLabel(raw: string | null | undefined) {
   if (!raw) return "";
-  const trimmed = String(raw).trim();
+  let trimmed = String(raw).trim();
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    return trimmed.slice(1, -1).trim();
+    trimmed = trimmed.slice(1, -1).trim();
   }
-  return trimmed;
+  // Citations coming from the warehouse sometimes include FILE_ prefixes
+  // that are only useful internally. Remove them so the UI shows exactly
+  // what the "Citation" column stored.
+  const withoutFilePrefix = trimmed.replace(
+    /^FILE_[^\s:]+[:\-]?\s*/i,
+    ""
+  );
+  return withoutFilePrefix || trimmed;
 }
 
 function toCiteLinks(text: string, hits: Hit[]) {
@@ -302,16 +309,39 @@ function buildProgressiveQueries(chunk: string): string[] {
   const minWindow = Math.min(10, words.length);
   const queries: string[] = [];
   const seen = new Set<string>();
-  for (let size = minWindow; size <= words.length; size += 1) {
+
+  // Start by emulating a Ctrl+F search: take the first 10 words and keep
+  // sliding the window forward until we exhaust the chunk.
+  const maxStart = Math.max(0, words.length - minWindow);
+  for (let start = 0; start <= maxStart; start += 1) {
+    const segment = words.slice(start, start + minWindow).join(" ").trim();
+    if (!segment || seen.has(segment)) continue;
+    queries.push(segment);
+    seen.add(segment);
+  }
+
+  // If that fails, progressively add more words from the beginning so we
+  // search increasingly larger contexts.
+  for (let size = minWindow + 1; size <= words.length; size += 1) {
     const segment = words.slice(0, size).join(" ").trim();
     if (!segment || seen.has(segment)) continue;
     queries.push(segment);
     seen.add(segment);
   }
+
   if (!seen.has(normalized)) {
     queries.push(normalized);
   }
+
   return queries;
+}
+
+function citationDisplay(hit: Hit) {
+  return (
+    (hit.citation && normalizeCitationLabel(hit.citation)) ||
+    labelFromMeta(hit.metadata) ||
+    "Context"
+  );
 }
 
 function buildChunkVariants(chunk: string): string[] {
@@ -1953,10 +1983,7 @@ function ValidationWarningModal({
         <ul className="mt-2 space-y-2 text-sm text-neutral-200">
           {hits.length ? (
             hits.map((h, idx) => {
-              const label =
-                normalizeCitationLabel(h.citation ?? "") ||
-                labelFromMeta(h.metadata) ||
-                "Context";
+              const label = citationDisplay(h);
               const filename = h.metadata?.filename;
               return (
                 <li
@@ -2059,8 +2086,8 @@ function Composer({
         </div>
         <div className="text-[11px] text-neutral-500 mt-1">
           {selectedLecture
-            ? `Restricted to ${selectedLecture}`
-            : "Auto-detecting lecture"}
+            ? `Focusing on ${selectedLecture}. Switch back to “All lectures” above to widen the evidence pool.`
+            : "No lecture selected — we’ll auto-detect the most relevant lecture and cite supporting material automatically."}
         </div>
       </div>
     </div>
@@ -2316,10 +2343,7 @@ function ChatTurn({
                   }
                 >
                   <div className="font-mono text-neutral-300">
-                    {(h.citation && normalizeCitationLabel(h.citation)) ||
-                      labelFromMeta(h.metadata) ||
-                      "Context"}
-                    {` · ${h.score.toFixed(3)}`}
+                    {citationDisplay(h)}
                   </div>
                   <div className="text-neutral-400 line-clamp-3">{h.text}</div>
                 </button>
