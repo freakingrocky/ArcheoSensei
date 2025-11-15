@@ -148,7 +148,14 @@ pub async fn query(
         answer,
         fact_check,
         llm,
-    } = llm::run_fact_check_pipeline(&state.settings, &payload.query, &context, None).await?;
+    } = llm::run_fact_check_pipeline(
+        &state.settings,
+        Some(&state.embedder),
+        &payload.query,
+        &context,
+        None,
+    )
+    .await?;
     let response = QueryResponse {
         diagnostics,
         top_k: hits.len(),
@@ -284,40 +291,64 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
                 jobs_for_progress.update_job(&job_id_for_progress, payload);
             }
             "attempt_complete" => {
+                let retry_count = event
+                    .data
+                    .get("retry_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default() as usize;
+                let needs_retry = event
+                    .data
+                    .get("needs_retry")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut payload = json!({
+                    "retry_count": retry_count,
+                    "message": if needs_retry {
+                        "AI response could not be validated, retrying..."
+                    } else {
+                        ""
+                    },
+                });
                 if let Some(attempts) = event.data.get("attempts").cloned() {
-                    let retry_count = event
-                        .data
-                        .get("retry_count")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default() as usize;
-                    jobs_for_progress.update_job(
-                        &job_id_for_progress,
-                        json!({
-                            "attempts": attempts,
-                            "retry_count": retry_count,
-                        }),
-                    );
+                    payload["attempts"] = attempts;
                 }
+                jobs_for_progress.update_job(&job_id_for_progress, payload);
             }
             _ => {}
         });
 
-    match llm::run_fact_check_pipeline(&state.settings, &payload.query, &context, Some(progress_cb))
-        .await
+    match llm::run_fact_check_pipeline(
+        &state.settings,
+        Some(&state.embedder),
+        &payload.query,
+        &context,
+        Some(progress_cb),
+    )
+    .await
     {
         Ok(FactCheckOutput {
             answer,
             fact_check,
             llm,
         }) => {
+            let passed = fact_check.status == "passed";
+            let final_status = if passed { "succeeded" } else { "failed" };
+            let message = if passed {
+                String::new()
+            } else {
+                fact_check.message.clone().unwrap_or_else(|| {
+                    "AI response could not be validated after retries.".to_string()
+                })
+            };
             state.jobs.update_job(
                 &job_id,
                 json!({
-                    "status": "succeeded",
+                    "status": final_status,
                     "phase": "done",
                     "answer": answer,
-                    "fact_check": serde_json::to_value(fact_check).unwrap_or(json!({})),
+                    "fact_check": serde_json::to_value(&fact_check).unwrap_or(json!({})),
                     "llm": serde_json::to_value(llm).unwrap_or(json!({})),
+                    "message": message,
                 }),
             );
         }
