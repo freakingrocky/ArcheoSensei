@@ -96,6 +96,14 @@ pub struct ClaimCheckClaim {
     pub entailment_probability: f32,
     pub neutral_probability: f32,
     pub contradiction_probability: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_share_context: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_share_answer: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cos_to_answer: Option<f32>,
 }
 
 impl Default for ClaimCheckClaim {
@@ -108,6 +116,10 @@ impl Default for ClaimCheckClaim {
             entailment_probability: 0.0,
             neutral_probability: 0.0,
             contradiction_probability: 0.0,
+            topic_index: None,
+            topic_share_context: None,
+            topic_share_answer: None,
+            max_cos_to_answer: None,
         }
     }
 }

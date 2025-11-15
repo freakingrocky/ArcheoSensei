@@ -148,7 +148,14 @@ pub async fn query(
         answer,
         fact_check,
         llm,
-    } = llm::run_fact_check_pipeline(&state.settings, &payload.query, &context, None).await?;
+    } = llm::run_fact_check_pipeline(
+        &state.settings,
+        &state.embedder,
+        &payload.query,
+        &context,
+        None,
+    )
+    .await?;
     let response = QueryResponse {
         diagnostics,
         top_k: hits.len(),
@@ -302,8 +309,14 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             _ => {}
         });
 
-    match llm::run_fact_check_pipeline(&state.settings, &payload.query, &context, Some(progress_cb))
-        .await
+    match llm::run_fact_check_pipeline(
+        &state.settings,
+        &state.embedder,
+        &payload.query,
+        &context,
+        Some(progress_cb),
+    )
+    .await
     {
         Ok(FactCheckOutput {
             answer,

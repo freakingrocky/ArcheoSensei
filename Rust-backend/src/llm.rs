@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use regex::Regex;
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -8,14 +9,13 @@ use tokio::time::Duration;
 
 use crate::{
     config::Settings,
+    embedder::SentenceEmbedder,
     models::{
         ClaimCheckClaim, ClaimCheckResult, FactAiCheck, FactCheckAttempt, FactCheckResult,
         FactProgressCallback, FactProgressEvent, LlmInfo, LlmUsage, QuizGradeResponse,
         QuizQuestion,
     },
 };
-
-use std::collections::HashSet;
 
 use tracing::warn;
 
@@ -132,12 +132,16 @@ fn emit_progress(handler: &Option<FactProgressCallback>, stage: &'static str, da
     }
 }
 
-pub async fn run_fact_check_pipeline(
+pub async fn run_fact_check_pipeline<E>(
     settings: &Settings,
+    embedder: &E,
     query: &str,
     context: &str,
     progress: Option<FactProgressCallback>,
-) -> Result<FactCheckOutput> {
+) -> Result<FactCheckOutput>
+where
+    E: SentenceEmbedder,
+{
     let max_attempts = resolve_fact_attempts();
     let threshold = resolve_fact_threshold(settings);
     let mut attempts: Vec<FactCheckAttempt> = Vec::new();
@@ -185,7 +189,7 @@ pub async fn run_fact_check_pipeline(
                 "ai_check": ai_check,
             }),
         );
-        let claim_check = claim_check(context, &final_answer, threshold);
+        let claim_check = claim_check(embedder, context, &final_answer, threshold).await?;
         emit_progress(
             &progress,
             "fact_claims",
@@ -422,80 +426,233 @@ fn parse_fact_check_response(content: &str) -> FactAiCheck {
     }
 }
 
-fn claim_check(context: &str, answer: &str, threshold: f32) -> ClaimCheckResult {
-    let context_sentences = extract_sentences(context);
-    let claims = generate_claims(answer);
+async fn claim_check<E: SentenceEmbedder>(
+    embedder: &E,
+    context: &str,
+    answer: &str,
+    threshold: f32,
+) -> Result<ClaimCheckResult> {
+    const K_MAX: usize = 24;
+    const K_MIN: usize = 1;
+    const CENTROID_MATCH_TAU: f32 = 0.83;
+    const MASS_RATIO_BETA: f32 = 0.45;
+    const MIN_CTX_SHARE: f32 = 0.15;
+    const MIN_ANS_COUNT: usize = 1;
+    const MERGE_TAU: f32 = 0.90;
+    const COVERAGE_MIN: f32 = 0.70;
+    const MIN_SENTENCE_CHARS: usize = 20;
 
-    if context_sentences.is_empty() {
-        return ClaimCheckResult {
+    let ctx_sents = extract_sentences(context, MIN_SENTENCE_CHARS);
+    let ans_sents = extract_sentences(answer, MIN_SENTENCE_CHARS);
+
+    if ctx_sents.is_empty() && ans_sents.is_empty() {
+        return Ok(ClaimCheckResult {
             score: 0.0,
-            entailed: 0,
-            total_claims: claims.len(),
-            threshold,
-            passed: false,
-            claims: Vec::new(),
-            details: Some("No context available for claim validation.".to_string()),
-        };
-    }
-
-    if claims.is_empty() {
-        return ClaimCheckResult {
-            score: 1.0,
             entailed: 0,
             total_claims: 0,
             threshold,
-            passed: true,
+            passed: false,
             claims: Vec::new(),
-            details: Some("No actionable claims detected in the answer.".to_string()),
-        };
-    }
-
-    let mut records = Vec::with_capacity(claims.len());
-    let mut entailed = 0usize;
-    let mut sum_scores = 0.0f32;
-    let mut failing_details = None;
-
-    for claim in claims {
-        let (best_idx, best_context, best_score) = best_context_match(&claim, &context_sentences);
-        let label = classify_similarity(best_score, threshold);
-        if label == "entailment" {
-            entailed += 1;
-        } else if failing_details.is_none() {
-            failing_details = Some(format!(
-                "Claim '{}' not fully supported by context '{}'.",
-                truncate(&claim, 160),
-                truncate(best_context, 160)
-            ));
-        }
-
-        records.push(ClaimCheckClaim {
-            claim: claim.clone(),
-            context: best_context.to_string(),
-            context_index: best_idx,
-            label: label.to_string(),
-            entailment_probability: best_score,
-            neutral_probability: (1.0 - best_score) * 0.6,
-            contradiction_probability: (1.0 - best_score) * 0.4,
+            details: Some("No sentences found for validation.".to_string()),
         });
-        sum_scores += best_score;
     }
 
-    let avg_score = if records.is_empty() {
-        0.0
-    } else {
-        sum_scores / records.len() as f32
-    };
-    let passed = !records.is_empty() && avg_score >= threshold;
+    if ctx_sents.is_empty() {
+        return Ok(ClaimCheckResult {
+            score: 0.0,
+            entailed: 0,
+            total_claims: ans_sents.len(),
+            threshold,
+            passed: false,
+            claims: Vec::new(),
+            details: Some("No context sentences available.".to_string()),
+        });
+    }
 
-    ClaimCheckResult {
-        score: avg_score,
-        entailed,
-        total_claims: records.len(),
+    if ans_sents.is_empty() {
+        return Ok(ClaimCheckResult {
+            score: 0.0,
+            entailed: 0,
+            total_claims: ctx_sents.len(),
+            threshold,
+            passed: false,
+            claims: Vec::new(),
+            details: Some("No answer sentences detected.".to_string()),
+        });
+    }
+
+    let mut ctx_emb = embedder.embed_strings(&ctx_sents).await?;
+    let mut ans_emb = embedder.embed_strings(&ans_sents).await?;
+    normalize_rows(&mut ctx_emb);
+    normalize_rows(&mut ans_emb);
+
+    let mut k = (f32::sqrt(ctx_sents.len() as f32).round() as usize).clamp(K_MIN, K_MAX);
+    if k > ctx_sents.len() {
+        k = ctx_sents.len().max(K_MIN);
+    }
+
+    if k <= 1 {
+        let score = 1.0;
+        return Ok(ClaimCheckResult {
+            score,
+            entailed: if !ans_sents.is_empty() { 1 } else { 0 },
+            total_claims: 1,
+            threshold,
+            passed: score >= threshold,
+            claims: Vec::new(),
+            details: None,
+        });
+    }
+
+    let (labels, centroids) = kmeans(&ctx_emb, k, 60, 1e-4);
+    if centroids.is_empty() {
+        return Ok(ClaimCheckResult {
+            score: 0.0,
+            entailed: 0,
+            total_claims: 0,
+            threshold,
+            passed: false,
+            claims: Vec::new(),
+            details: Some("Unable to derive context topics for validation.".to_string()),
+        });
+    }
+    let (centroids, labels) = merge_centroids(centroids, labels, MERGE_TAU);
+    let k_eff = centroids.len();
+    if k_eff == 0 {
+        return Ok(ClaimCheckResult {
+            score: 0.0,
+            entailed: 0,
+            total_claims: 0,
+            threshold,
+            passed: false,
+            claims: Vec::new(),
+            details: Some("Context clustering collapsed during validation.".to_string()),
+        });
+    }
+
+    let p_ctx = histogram(&labels, k_eff);
+    let ans_labels = assign_to_centroids(&ans_emb, &centroids);
+    let p_ans = histogram(&ans_labels, k_eff);
+    let jsd = js_distance(&p_ctx, &p_ans);
+    let score = (1.0 - jsd).clamp(0.0, 1.0);
+
+    let significant: Vec<bool> = p_ctx
+        .iter()
+        .map(|&share| share >= MIN_CTX_SHARE as f64)
+        .collect();
+    let significant_any = significant.iter().any(|&flag| flag);
+    let mut covered_flags = vec![false; k_eff];
+
+    for topic_idx in 0..k_eff {
+        if p_ans[topic_idx] >= (MASS_RATIO_BETA as f64) * p_ctx[topic_idx] {
+            covered_flags[topic_idx] = true;
+        }
+        let count = ans_labels
+            .iter()
+            .filter(|&&label| label == topic_idx)
+            .count();
+        if count >= MIN_ANS_COUNT {
+            covered_flags[topic_idx] = true;
+        }
+    }
+
+    let mut normalized_centroids = centroids.clone();
+    normalize_rows(&mut normalized_centroids);
+    let mut max_cos_by_topic = vec![0.0f32; k_eff];
+    for (topic_idx, centroid) in normalized_centroids.iter().enumerate() {
+        let mut best = 0.0f32;
+        for ans in &ans_emb {
+            let cos = dot(ans, centroid);
+            if cos > best {
+                best = cos;
+            }
+        }
+        if best >= CENTROID_MATCH_TAU {
+            covered_flags[topic_idx] = true;
+        }
+        max_cos_by_topic[topic_idx] = best;
+    }
+
+    let sig_count = if significant_any {
+        significant.iter().filter(|&&flag| flag).count().max(1)
+    } else {
+        k_eff.max(1)
+    };
+    let covered_sig = if significant_any {
+        significant
+            .iter()
+            .zip(covered_flags.iter())
+            .filter(|pair| *pair.0 && *pair.1)
+            .count()
+    } else {
+        covered_flags.iter().filter(|&&covered| covered).count()
+    };
+    let coverage = covered_sig as f32 / sig_count as f32;
+    let passed = (score >= threshold) || (coverage >= COVERAGE_MIN);
+
+    let mut claims = Vec::new();
+    if significant_any {
+        for (topic_idx, (&sig, &covered)) in
+            significant.iter().zip(covered_flags.iter()).enumerate()
+        {
+            if !sig || covered {
+                continue;
+            }
+            let members: Vec<usize> = labels
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, &label)| (label == topic_idx).then_some(idx))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let mut best_idx = members[0];
+            let mut best_cos = -1.0f32;
+            for &idx in &members {
+                let cos = dot(&ctx_emb[idx], &normalized_centroids[topic_idx]);
+                if cos > best_cos {
+                    best_cos = cos;
+                    best_idx = idx;
+                }
+            }
+            let rep = ctx_sents[best_idx].clone();
+            claims.push(ClaimCheckClaim {
+                claim: format!("Missing topic: {}", truncate(&rep, 180)),
+                context: rep,
+                context_index: best_idx,
+                label: "missing_topic".to_string(),
+                entailment_probability: 0.0,
+                neutral_probability: 0.0,
+                contradiction_probability: 1.0,
+                topic_index: Some(topic_idx),
+                topic_share_context: Some(p_ctx[topic_idx] as f32),
+                topic_share_answer: Some(p_ans[topic_idx] as f32),
+                max_cos_to_answer: Some(max_cos_by_topic[topic_idx]),
+            });
+        }
+    }
+
+    let detail = if passed {
+        None
+    } else {
+        Some(format!(
+            "Evidence coverage {:.0}% (target {:.0}%) and topic alignment {:.0}% (target {:.0}%).",
+            coverage * 100.0,
+            COVERAGE_MIN * 100.0,
+            score * 100.0,
+            threshold * 100.0
+        ))
+    };
+
+    Ok(ClaimCheckResult {
+        score,
+        entailed: covered_sig,
+        total_claims: sig_count,
         threshold,
         passed,
-        claims: records,
-        details: if passed { None } else { failing_details },
-    }
+        claims,
+        details: detail,
+    })
 }
 
 fn build_retry_directives(ai_check: &FactAiCheck, claim_check: &ClaimCheckResult) -> String {
@@ -514,11 +671,19 @@ fn build_retry_directives(ai_check: &FactAiCheck, claim_check: &ClaimCheckResult
             .iter()
             .find(|c| c.label.to_lowercase() != "entailment")
         {
-            parts.push(format!(
-                "Avoid unsupported claim: '{}'. Ground the answer near: '{}'.",
-                truncate(&failing.claim, 160),
-                truncate(&failing.context, 160)
-            ));
+            let claim = truncate(&failing.claim, 160);
+            let ctx = truncate(&failing.context, 160);
+            if failing.label.to_lowercase() == "missing_topic" {
+                parts.push(format!(
+                    "Address the missing topic '{}'. Incorporate evidence near '{}'.",
+                    claim, ctx
+                ));
+            } else {
+                parts.push(format!(
+                    "Avoid unsupported claim: '{}'. Ground the answer near: '{}'.",
+                    claim, ctx
+                ));
+            }
         }
     }
 
@@ -550,31 +715,6 @@ fn truncate(text: &str, limit: usize) -> String {
     truncated
 }
 
-fn classify_similarity(score: f32, threshold: f32) -> &'static str {
-    if score >= threshold {
-        "entailment"
-    } else if score >= threshold * 0.6 {
-        "neutral"
-    } else {
-        "contradiction"
-    }
-}
-
-fn best_context_match<'a>(claim: &str, sentences: &'a [String]) -> (usize, &'a str, f32) {
-    let mut best_idx = 0usize;
-    let mut best_sentence = "";
-    let mut best_score = 0.0f32;
-    for (idx, sentence) in sentences.iter().enumerate() {
-        let score = overlap_score(claim, sentence);
-        if score > best_score {
-            best_score = score;
-            best_idx = idx;
-            best_sentence = sentence;
-        }
-    }
-    (best_idx, best_sentence, best_score)
-}
-
 fn strip_citations(text: &str) -> String {
     lazy_static::lazy_static! {
         static ref CITE_RE: Regex = Regex::new(r"\[[^\]]+\]").unwrap();
@@ -582,49 +722,290 @@ fn strip_citations(text: &str) -> String {
     CITE_RE.replace_all(text, "").to_string()
 }
 
-fn tokenize(text: &str) -> Vec<String> {
-    strip_citations(text)
-        .split_whitespace()
-        .map(|token| {
-            token
-                .trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
-fn overlap_score(claim: &str, sentence: &str) -> f32 {
-    let claim_tokens = tokenize(claim);
-    if claim_tokens.is_empty() {
-        return 0.0;
+fn normalize_rows(data: &mut [Vec<f32>]) {
+    for row in data.iter_mut() {
+        let norm = row.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt() as f32;
+        if norm > 1e-6 {
+            for value in row.iter_mut() {
+                *value /= norm;
+            }
+        }
     }
-    let context_tokens: HashSet<_> = tokenize(sentence).into_iter().collect();
-    let common = claim_tokens
-        .iter()
-        .filter(|token| context_tokens.contains(*token))
-        .count();
-    common as f32 / claim_tokens.len() as f32
 }
 
-fn extract_sentences(text: &str) -> Vec<String> {
-    text.split(|c| matches!(c, '.' | '!' | '?' | '\n'))
-        .filter_map(|part| {
-            let trimmed = part.trim();
-            (!trimmed.is_empty()).then(|| strip_citations(trimmed))
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+fn squared_distance(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let diff = x - y;
+            diff * diff
+        })
+        .sum()
+}
+
+fn kmeans_pp_init(data: &[Vec<f32>], k: usize, rng: &mut StdRng) -> Vec<Vec<f32>> {
+    let mut centroids = Vec::with_capacity(k);
+    let mut chosen = rng.gen_range(0..data.len());
+    centroids.push(data[chosen].clone());
+    let mut distances: Vec<f32> = data
+        .iter()
+        .map(|point| squared_distance(point, &centroids[0]))
+        .collect();
+    for _ in 1..k {
+        let total: f32 = distances.iter().sum::<f32>().max(f32::EPSILON);
+        let target = rng.gen_range(0.0..total);
+        let mut cumulative = 0.0;
+        chosen = 0;
+        for (idx, dist) in distances.iter().enumerate() {
+            cumulative += *dist;
+            if cumulative >= target {
+                chosen = idx;
+                break;
+            }
+        }
+        centroids.push(data[chosen].clone());
+        for (idx, point) in data.iter().enumerate() {
+            let dist = squared_distance(point, centroids.last().unwrap());
+            if dist < distances[idx] {
+                distances[idx] = dist;
+            }
+        }
+    }
+    centroids
+}
+
+fn kmeans(data: &[Vec<f32>], k: usize, max_iter: usize, tol: f32) -> (Vec<usize>, Vec<Vec<f32>>) {
+    let dim = data[0].len();
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut centroids = kmeans_pp_init(data, k, &mut rng);
+    let mut labels = vec![0usize; data.len()];
+    let mut counts = vec![0usize; k];
+
+    for _ in 0..max_iter {
+        let mut changed = false;
+        for (idx, point) in data.iter().enumerate() {
+            let mut best_idx = 0usize;
+            let mut best_dist = f32::MAX;
+            for (c_idx, centroid) in centroids.iter().enumerate() {
+                let dist = squared_distance(point, centroid);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_idx = c_idx;
+                }
+            }
+            if labels[idx] != best_idx {
+                labels[idx] = best_idx;
+                changed = true;
+            }
+        }
+
+        let mut new_centroids = vec![vec![0.0f32; dim]; k];
+        counts.fill(0);
+        for (point, &label) in data.iter().zip(labels.iter()) {
+            for (value, coord) in new_centroids[label].iter_mut().zip(point.iter()) {
+                *value += *coord;
+            }
+            counts[label] += 1;
+        }
+
+        for (centroid, &count) in new_centroids.iter_mut().zip(counts.iter()) {
+            if count > 0 {
+                for value in centroid.iter_mut() {
+                    *value /= count as f32;
+                }
+            } else {
+                let idx = rng.gen_range(0..data.len());
+                *centroid = data[idx].clone();
+            }
+        }
+
+        let shift = centroids
+            .iter()
+            .zip(new_centroids.iter())
+            .map(|(old, new)| squared_distance(old, new))
+            .sum::<f32>()
+            .sqrt();
+        centroids = new_centroids;
+        if !changed || shift <= tol {
+            break;
+        }
+    }
+
+    (labels, centroids)
+}
+
+fn merge_centroids(
+    centroids: Vec<Vec<f32>>,
+    labels: Vec<usize>,
+    tau: f32,
+) -> (Vec<Vec<f32>>, Vec<usize>) {
+    if centroids.len() <= 1 {
+        return (centroids, labels);
+    }
+    let mut normalized = centroids.clone();
+    normalize_rows(&mut normalized);
+    let mut used = vec![false; centroids.len()];
+    let mut remap = vec![usize::MAX; centroids.len()];
+    let mut merged = Vec::new();
+
+    for i in 0..centroids.len() {
+        if used[i] {
+            continue;
+        }
+        used[i] = true;
+        let mut group = vec![i];
+        for j in (i + 1)..centroids.len() {
+            if used[j] {
+                continue;
+            }
+            if dot(&normalized[i], &normalized[j]) >= tau {
+                used[j] = true;
+                group.push(j);
+            }
+        }
+        let mut avg = vec![0.0f32; centroids[0].len()];
+        for &idx in &group {
+            for (value, coord) in avg.iter_mut().zip(centroids[idx].iter()) {
+                *value += *coord;
+            }
+        }
+        for value in avg.iter_mut() {
+            *value /= group.len() as f32;
+        }
+        let new_idx = merged.len();
+        for &idx in &group {
+            remap[idx] = new_idx;
+        }
+        merged.push(avg);
+    }
+
+    let mut new_labels = labels;
+    for label in new_labels.iter_mut() {
+        if let Some(mapped) = remap.get(*label) {
+            *label = *mapped;
+        }
+    }
+
+    (merged, new_labels)
+}
+
+fn histogram(labels: &[usize], k: usize) -> Vec<f64> {
+    let mut hist = vec![0.0f64; k];
+    for &label in labels {
+        if label < k {
+            hist[label] += 1.0;
+        }
+    }
+    let sum: f64 = hist.iter().sum();
+    if sum > 0.0 {
+        for value in hist.iter_mut() {
+            *value /= sum;
+        }
+    } else if k > 0 {
+        hist[0] = 1.0;
+    }
+    hist
+}
+
+fn assign_to_centroids(points: &[Vec<f32>], centroids: &[Vec<f32>]) -> Vec<usize> {
+    if centroids.is_empty() {
+        return Vec::new();
+    }
+    let mut normalized = centroids.to_vec();
+    normalize_rows(&mut normalized);
+    points
+        .iter()
+        .map(|point| {
+            let mut best_idx = 0usize;
+            let mut best_dot = f32::MIN;
+            for (idx, centroid) in normalized.iter().enumerate() {
+                let sim = dot(point, centroid);
+                if sim > best_dot {
+                    best_dot = sim;
+                    best_idx = idx;
+                }
+            }
+            best_idx
         })
         .collect()
 }
 
-fn generate_claims(answer: &str) -> Vec<String> {
-    extract_sentences(answer)
+fn js_distance(p: &[f64], q: &[f64]) -> f32 {
+    fn normalize(dist: &[f64]) -> Vec<f64> {
+        let mut norm = dist.iter().cloned().collect::<Vec<_>>();
+        let sum: f64 = norm.iter().sum();
+        if sum > 0.0 {
+            for value in norm.iter_mut() {
+                *value = (*value).clamp(1e-12, 1.0);
+            }
+            let new_sum: f64 = norm.iter().sum();
+            for value in norm.iter_mut() {
+                *value /= new_sum;
+            }
+        } else if !norm.is_empty() {
+            norm[0] = 1.0;
+        }
+        norm
+    }
+
+    let p_norm = normalize(p);
+    let q_norm = normalize(q);
+    let m: Vec<f64> = p_norm
+        .iter()
+        .zip(q_norm.iter())
+        .map(|(a, b)| 0.5 * (a + b))
+        .collect();
+
+    fn kl(a: &[f64], b: &[f64]) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| x * ((x / y).ln() / std::f64::consts::LN_2))
+            .sum::<f64>()
+    }
+
+    let jsd = 0.5 * (kl(&p_norm, &m) + kl(&q_norm, &m));
+    jsd.sqrt() as f32
+}
+
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == '\n' {
+            if !current.trim().is_empty() {
+                sentences.push(current.trim().to_string());
+            }
+            current.clear();
+            continue;
+        }
+        current.push(ch);
+        if matches!(ch, '.' | '!' | '?') {
+            if !current.trim().is_empty() {
+                sentences.push(current.trim().to_string());
+            }
+            current.clear();
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+    sentences
+}
+
+fn extract_sentences(text: &str, min_chars: usize) -> Vec<String> {
+    split_sentences(text)
         .into_iter()
         .map(|s| {
-            s.trim_start_matches(|c| matches!(c, '•' | '*' | '-' | ' '))
+            strip_citations(&s)
+                .trim_start_matches(|c: char| matches!(c, '•' | '*' | '-' | ' '))
                 .trim()
                 .to_string()
         })
-        .filter(|s| s.split_whitespace().count() >= 5 && s.chars().count() >= 20)
+        .filter(|s| s.chars().count() >= min_chars)
         .collect()
 }
 
@@ -634,6 +1015,27 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use serde_json::Value;
     use tokio::net::TcpListener;
+
+    use crate::embedder::SentenceEmbedder;
+
+    #[derive(Clone, Default)]
+    struct StubEmbedder;
+
+    #[async_trait::async_trait]
+    impl SentenceEmbedder for StubEmbedder {
+        async fn embed_strings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| simple_embed(t)).collect())
+        }
+    }
+
+    fn simple_embed(text: &str) -> Vec<f32> {
+        let mut vec = vec![0.0f32; 8];
+        for (idx, ch) in text.chars().enumerate() {
+            let bucket = idx % vec.len();
+            vec[bucket] += ((ch as u32) % 17) as f32 / 17.0;
+        }
+        vec
+    }
 
     async fn mock_completion(Json(payload): Json<Value>) -> Json<Value> {
         let messages = payload
@@ -706,10 +1108,16 @@ mod tests {
 
         let settings = test_settings(format!("http://{}", addr));
         let context = "Lecture 1 Slide 2 discusses the capital city of Italy, which is Rome.";
-        let result =
-            run_fact_check_pipeline(&settings, "What is the capital of Italy?", context, None)
-                .await
-                .unwrap();
+        let embedder = StubEmbedder::default();
+        let result = run_fact_check_pipeline(
+            &settings,
+            &embedder,
+            "What is the capital of Italy?",
+            context,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.fact_check.status, "passed");
         assert_eq!(result.fact_check.attempts.len(), 1);
