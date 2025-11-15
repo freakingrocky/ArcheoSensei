@@ -235,10 +235,59 @@ function labelFromMeta(md: any) {
   return "";
 }
 
+const DEFAULT_PDF_VIEWER_BASE =
+  "https://mozilla.github.io/pdf.js/web/viewer.html";
 const REGEX_ESCAPE = /[.*+?^${}()|[\]\\]/g;
 
 function escapeRegExp(value: string) {
   return value.replace(REGEX_ESCAPE, "\\$&");
+}
+
+function formatEvidenceSnippet(text: string, limit = 360) {
+  if (!text) return "";
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length > limit
+    ? `${normalized.slice(0, limit - 1)}…`
+    : normalized;
+}
+
+function getPdfViewerBase() {
+  const env = process.env.NEXT_PUBLIC_PDF_VIEWER_BASE;
+  if (env && env.trim()) {
+    return env.trim().replace(/\/$/, "");
+  }
+  return DEFAULT_PDF_VIEWER_BASE;
+}
+
+function selectSearchSeed(chunk: string) {
+  const queries = buildProgressiveQueries(chunk);
+  if (queries.length) {
+    return queries[0];
+  }
+  const fallback = chunk
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 12)
+    .join(" ");
+  return fallback;
+}
+
+function buildPdfViewerUrl(fileUrl: string, chunk: string) {
+  if (!fileUrl) return null;
+  const base = getPdfViewerBase();
+  const encodedFile = encodeURIComponent(fileUrl);
+  const searchSeed = selectSearchSeed(chunk);
+  const hash = searchSeed
+    ? `#search=${encodeURIComponent(searchSeed)}&phrase=true&caseSensitive=false`
+    : "";
+  return `${base}?file=${encodedFile}${hash}`;
+}
+
+function isLikelyPdf(url: string | null) {
+  if (!url) return false;
+  return /\.pdf(?:$|[?#])/i.test(url);
 }
 
 function normalizeCitationLabel(raw: string | null | undefined) {
@@ -282,11 +331,23 @@ type ChunkMatch = {
   query: string;
 };
 
-type CitationViewerState = {
+type PdfCitationViewer = {
+  mode: "pdf";
+  citation: string;
+  fileUrl: string;
+  viewerUrl: string;
+  chunkPreview: string;
+  searchQuery?: string;
+};
+
+type TextCitationViewer = {
+  mode: "text";
   citation: string;
   fileUrl: string | null;
   html: string;
 };
+
+type CitationViewerState = PdfCitationViewer | TextCitationViewer;
 
 function escapeHtml(value: string) {
   return value
@@ -561,9 +622,10 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
   }
 
   const className =
-    "inline-flex items-center text-indigo-300 underline decoration-dotted " +
-    "hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 " +
-    "focus-visible:outline-offset-2 focus-visible:outline-indigo-400";
+    "citation-pill evidence-hover inline-flex items-center gap-1 rounded-full " +
+    "border border-indigo-400/40 bg-indigo-500/15 px-2 py-0.5 text-[13px] " +
+    "font-semibold text-indigo-100 transition hover:bg-indigo-500/25 focus-visible:ring-2 " +
+    "focus-visible:ring-indigo-300 focus-visible:outline-none";
 
   const handleClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
     event.preventDefault();
@@ -590,6 +652,8 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
         onMouseLeave={closePreview}
         onFocus={openPreview}
         onBlur={closePreview}
+        data-evidence={preview ? `Evidence snippet: ${preview}` : undefined}
+        aria-label={`Open citation${preview ? `: ${preview.slice(0, 80)}` : ""}`}
       >
         {children}
       </button>
@@ -615,6 +679,13 @@ type ClaimCheckEntry = {
   context_index?: number;
   label?: string;
 };
+
+function buildClaimTooltip(entry?: ClaimCheckEntry | null) {
+  if (!entry) return "";
+  const label = entry.label ? entry.label.toUpperCase() : "UNKNOWN";
+  const context = entry.context?.trim();
+  return context ? `[${label}] ${context}` : `[${label}] Evidence unavailable.`;
+}
 
 function createClaimHighlighter(claims: ClaimCheckEntry[]) {
   const entries = claims
@@ -676,6 +747,7 @@ function createClaimHighlighter(claims: ClaimCheckEntry[]) {
             return { type: "text", value: seg.text };
           }
           const verified = seg.claim.label === "entailment";
+          const tooltip = buildClaimTooltip(seg.claim);
           return {
             type: "claimHighlight",
             data: {
@@ -685,7 +757,7 @@ function createClaimHighlighter(claims: ClaimCheckEntry[]) {
                   verified ? "claim-chip--verified" : "claim-chip--unverified"
                 }`,
                 tabIndex: 0,
-                "data-tooltip": seg.claim.context || "",
+                "data-tooltip": tooltip,
               },
             },
             children: [{ type: "text", value: seg.text }],
@@ -1264,6 +1336,11 @@ export default function ChatPage() {
       (typeof meta.file_url === "string" && meta.file_url) ||
       (typeof meta.fileUrl === "string" && meta.fileUrl);
     const directUrl = resolveFileUrl(rawUrl);
+    const chunkText = hit.text || "";
+    const citationLabel =
+      normalizeCitationLabel(hit.citation ?? "") ||
+      labelFromMeta(meta) ||
+      "Source";
     if (!directUrl) {
       await openSourceByMeta(meta);
       return;
@@ -1272,6 +1349,18 @@ export default function ChatPage() {
     setCitationViewer(null);
     setCitationLoading(true);
     try {
+      if (isLikelyPdf(directUrl)) {
+        const viewerUrl = buildPdfViewerUrl(directUrl, chunkText) || directUrl;
+        setCitationViewer({
+          mode: "pdf",
+          citation: citationLabel,
+          fileUrl: directUrl,
+          viewerUrl,
+          chunkPreview: formatEvidenceSnippet(chunkText),
+          searchQuery: selectSearchSeed(chunkText),
+        });
+        return;
+      }
       const res = await fetch(directUrl, { cache: "no-store" });
       if (!res.ok) {
         const win = window.open(directUrl, "_blank", "noopener");
@@ -1292,19 +1381,16 @@ export default function ChatPage() {
       }
 
       const text = await res.text();
-      const match = findChunkMatch(text, hit.text || "");
-      const citationLabel =
-        normalizeCitationLabel(hit.citation ?? "") ||
-        labelFromMeta(meta) ||
-        "Source";
+      const match = findChunkMatch(text, chunkText);
       const html = buildDocumentHtml({
         citation: citationLabel,
         fileUrl: directUrl,
         docText: text,
         match,
-        chunk: hit.text || "",
+        chunk: chunkText,
       });
       setCitationViewer({
+        mode: "text",
         citation: citationLabel,
         fileUrl: directUrl,
         html,
@@ -1928,11 +2014,34 @@ export default function ChatPage() {
                 </button>
               </div>
             </div>
-            <iframe
-              title="Citation source preview"
-              srcDoc={citationViewer.html}
-              className="mt-4 h-[70vh] w-full rounded-xl border border-neutral-800 bg-black"
-            />
+            {citationViewer.mode === "pdf" ? (
+              <>
+                {citationViewer.searchQuery && (
+                  <div className="mt-4 rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3 text-xs text-indigo-100">
+                    Automatically searching inside the PDF for “
+                    {citationViewer.searchQuery}”. Use the viewer search (⌘/Ctrl+F)
+                    if you need to refine further.
+                  </div>
+                )}
+                {citationViewer.chunkPreview && (
+                  <div className="mt-2 text-xs text-neutral-400">
+                    Evidence snippet: {citationViewer.chunkPreview}
+                  </div>
+                )}
+                <iframe
+                  key={citationViewer.viewerUrl}
+                  title="Citation PDF preview"
+                  src={citationViewer.viewerUrl}
+                  className="mt-4 h-[70vh] w-full rounded-xl border border-neutral-800 bg-black"
+                />
+              </>
+            ) : (
+              <iframe
+                title="Citation source preview"
+                srcDoc={citationViewer.html}
+                className="mt-4 h-[70vh] w-full rounded-xl border border-neutral-800 bg-black"
+              />
+            )}
           </div>
         </div>
       )}
@@ -2396,24 +2505,30 @@ function ChatTurn({
               you can verify the quote in context instantly.
             </p>
             <div className="space-y-2">
-              {hits.map((h, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  className="w-full text-left text-xs border border-neutral-800 rounded-xl p-2 hover:bg-neutral-800/40"
-                  onClick={() => onOpenCitation(h)}
-                  title={
-                    h.text ? h.text.replace(/\s+/g, " ").trim() : undefined
-                  }
-                >
-                  <div className="font-mono text-neutral-300">
-                    {(h.citation && normalizeCitationLabel(h.citation)) ||
-                      labelFromMeta(h.metadata) ||
-                      "Context"}
-                  </div>
-                  <div className="text-neutral-400 line-clamp-3">{h.text}</div>
-                </button>
-              ))}
+              {hits.map((h, idx) => {
+                const label =
+                  (h.citation && normalizeCitationLabel(h.citation)) ||
+                  labelFromMeta(h.metadata) ||
+                  "Context";
+                const evidence = formatEvidenceSnippet(h.text || "");
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    className="evidence-hover w-full rounded-xl border border-indigo-400/30 bg-neutral-900/70 p-3 text-left text-xs transition hover:bg-indigo-500/10"
+                    onClick={() => onOpenCitation(h)}
+                    data-evidence={
+                      evidence ? `Evidence snippet: ${evidence}` : undefined
+                    }
+                    aria-label={`Open source ${label}`}
+                  >
+                    <div className="font-mono text-indigo-200">
+                      {label}
+                    </div>
+                    <div className="text-neutral-300 line-clamp-3">{h.text}</div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
