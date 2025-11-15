@@ -243,11 +243,14 @@ function escapeRegExp(value: string) {
 
 function normalizeCitationLabel(raw: string | null | undefined) {
   if (!raw) return "";
-  const trimmed = String(raw).trim();
+  let trimmed = String(raw).trim();
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    return trimmed.slice(1, -1).trim();
+    trimmed = trimmed.slice(1, -1).trim();
   }
-  return trimmed;
+  const withoutFileToken = trimmed
+    .replace(/FILE_[A-Z0-9._-]+/gi, "")
+    .replace(/^[\s:-]+|[\s:-]+$/g, "");
+  return withoutFileToken.replace(/\s{2,}/g, " ").trim();
 }
 
 function toCiteLinks(text: string, hits: Hit[]) {
@@ -390,6 +393,15 @@ function buildDocumentHtml({
   const safeCitation = escapeHtml(citation || "Source");
   const safeUrl = escapeHtml(fileUrl);
   const safeChunk = escapeHtml(chunk.trim());
+  const chunkWords = chunk
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const searchQueries = buildProgressiveQueries(chunk);
+  const searchPreview = searchQueries
+    .slice(0, 3)
+    .map((phrase) => `“${escapeHtml(truncateMiddle(phrase, 140))}”`)
+    .join(" · ");
   const normalizedDoc = docText.replace(/\r\n/g, "\n");
   let bodyHtml: string;
   if (match) {
@@ -401,12 +413,20 @@ function buildDocumentHtml({
     bodyHtml = escapeHtml(normalizedDoc);
   }
   const status = match
-    ? `<div class="status">Located chunk variant automatically.</div>`
-    : `<div class="status status--warn">Could not auto-locate the chunk. Showing full document for manual review.</div>`;
+    ? `<div class="status" data-search-feedback>Located the matching passage automatically.</div>`
+    : `<div class="status status--warn" data-search-feedback>Trying to auto-locate this passage with a Ctrl/Cmd+F style search…</div>`;
   const variantInfo = match
     ? `<div class="variant">Matched variant: <code>${escapeHtml(
         match.query
       )}</code></div>`
+    : "";
+  const searchHelp = searchQueries.length
+    ? `<div class="search-help">We programmatically run Ctrl+F using the snippet (starting with about ${Math.min(
+        10,
+        chunkWords.length || 10
+      )} words and expanding) until we hit the first match. Example phrases: ${
+        searchPreview || "Unavailable"
+      }.</div>`
     : "";
   return `<!DOCTYPE html>
   <html lang="en">
@@ -425,6 +445,7 @@ function buildDocumentHtml({
         .status--warn { color: #facc15; }
         .chunk { font-size: 13px; margin-bottom: 12px; color: #e0e7ff; }
         .variant { font-size: 12px; margin-bottom: 12px; color: #9ca3af; }
+        .search-help { font-size: 12px; margin-bottom: 12px; color: #a5b4fc; line-height: 1.4; }
         code { background: rgba(148, 163, 184, 0.2); padding: 2px 4px; border-radius: 4px; }
       </style>
     </head>
@@ -435,17 +456,82 @@ function buildDocumentHtml({
       </header>
       <main>
         ${status}
+        ${searchHelp}
         ${variantInfo}
         <div class="chunk"><strong>Chunk preview:</strong> ${safeChunk}</div>
         <pre>${bodyHtml}</pre>
       </main>
       <script>
-        const el = document.getElementById("__citation_hit");
-        if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          el.style.boxShadow = "0 0 0 4px rgba(250, 204, 21, 0.45)";
-          setTimeout(() => { el.style.boxShadow = ""; }, 2400);
-        }
+        (function() {
+          const queries = ${JSON.stringify(searchQueries)};
+          const feedback = document.querySelector('[data-search-feedback]');
+
+          function decorateMatch(el) {
+            if (!el) return;
+            el.scrollIntoView({ behavior: "smooth", block: "center" });
+            el.style.boxShadow = "0 0 0 4px rgba(250, 204, 21, 0.45)";
+            setTimeout(() => {
+              el.style.boxShadow = "";
+            }, 2400);
+          }
+
+          function highlightSelection() {
+            try {
+              const selection = window.getSelection();
+              if (!selection || !selection.rangeCount) {
+                return false;
+              }
+              const range = selection.getRangeAt(0);
+              if (range.collapsed) {
+                return false;
+              }
+              const wrapper = document.createElement('mark');
+              wrapper.id = '__citation_hit';
+              wrapper.appendChild(range.extractContents());
+              range.insertNode(wrapper);
+              decorateMatch(wrapper);
+              return true;
+            } catch (err) {
+              console.warn('Failed to wrap selection', err);
+              return false;
+            }
+          }
+
+          function runAutoFind() {
+            if (typeof window.find !== 'function' || !queries.length || document.getElementById('__citation_hit')) {
+              return false;
+            }
+            for (const query of queries) {
+              if (!query) continue;
+              const found = window.find(query, false, false, true, false, false, false);
+              if (found && highlightSelection()) {
+                if (feedback) {
+                  feedback.textContent = 'Found automatically using “' + query + '”.';
+                  feedback.classList.remove('status--warn');
+                }
+                return true;
+              }
+            }
+            return false;
+          }
+
+          window.addEventListener('load', () => {
+            const existing = document.getElementById('__citation_hit');
+            if (existing) {
+              decorateMatch(existing);
+              if (feedback && queries.length) {
+                feedback.textContent = 'Located using our pre-search. Try pressing Ctrl/Cmd+F if you need to jump again.';
+              }
+              return;
+            }
+            const matched = runAutoFind();
+            if (!matched && feedback && queries.length) {
+              feedback.textContent = 'Unable to auto-locate. Press Ctrl/Cmd+F and search for “' +
+                queries[0] + '”.';
+              feedback.classList.add('status--warn');
+            }
+          });
+        })();
       </script>
     </body>
   </html>`;
@@ -2304,6 +2390,11 @@ function ChatTurn({
             <div className="text-xs font-semibold text-neutral-300 mb-2">
               Sources
             </div>
+            <p className="text-[11px] text-neutral-400 mb-2">
+              Click a citation in the answer or below to open the source in a popup.
+              We automatically run a Ctrl/Cmd+F style search on the lecture file so
+              you can verify the quote in context instantly.
+            </p>
             <div className="space-y-2">
               {hits.map((h, idx) => (
                 <button
@@ -2319,7 +2410,6 @@ function ChatTurn({
                     {(h.citation && normalizeCitationLabel(h.citation)) ||
                       labelFromMeta(h.metadata) ||
                       "Context"}
-                    {` · ${h.score.toFixed(3)}`}
                   </div>
                   <div className="text-neutral-400 line-clamp-3">{h.text}</div>
                 </button>

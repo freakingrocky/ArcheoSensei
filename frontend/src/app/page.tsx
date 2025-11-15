@@ -23,11 +23,14 @@ const LOADING_LINES = [
 
 function formatCitationLabel(raw?: string | null) {
   if (!raw) return "";
-  const trimmed = String(raw).trim();
+  let trimmed = String(raw).trim();
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    return trimmed.slice(1, -1).trim();
+    trimmed = trimmed.slice(1, -1).trim();
   }
-  return trimmed;
+  const withoutFileToken = trimmed
+    .replace(/FILE_[A-Z0-9._-]+/gi, "")
+    .replace(/^[\s:-]+|[\s:-]+$/g, "");
+  return withoutFileToken.replace(/\s{2,}/g, " ").trim();
 }
 
 export default function Chat() {
@@ -165,6 +168,10 @@ export default function Chat() {
                     <div className="text-xs font-semibold text-neutral-300 mb-2">
                       Sources
                     </div>
+                    <p className="text-[11px] text-neutral-400 mb-2">
+                      Click any citation inside the answer to open a popup that auto-searches
+                      the lecture using the same snippet so you can verify it quickly.
+                    </p>
                     <div className="space-y-2 max-h-[35vh] overflow-auto">
                       {hits.map((h, idx) => (
                         <div
@@ -174,7 +181,6 @@ export default function Chat() {
                           <div className="font-mono text-neutral-300">
                             {(h.citation && formatCitationLabel(h.citation)) ||
                               "Context"}
-                            {` · ${h.score.toFixed(3)}`}
                           </div>
                           <div className="text-neutral-400 line-clamp-3">
                             {h.text}
