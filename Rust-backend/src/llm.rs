@@ -8,6 +8,7 @@ use tokio::time::Duration;
 
 use crate::{
     config::Settings,
+    embedder::Embedder,
     models::{
         ClaimCheckClaim, ClaimCheckResult, FactAiCheck, FactCheckAttempt, FactCheckResult,
         FactProgressCallback, FactProgressEvent, LlmInfo, LlmUsage, QuizGradeResponse,
@@ -20,6 +21,12 @@ use std::collections::HashSet;
 use tracing::warn;
 
 const DEFAULT_GROQ_BASE: &str = "https://api.groq.com";
+const MIN_CONTEXT_SENTENCE_CHARS: usize = 20;
+const MAX_CONTEXT_SENTENCES: usize = 160;
+const MIN_CLAIM_CHARS: usize = 32;
+const MIN_CLAIM_WORDS: usize = 5;
+const MAX_CLAIMS: usize = 48;
+const COVERAGE_PASS_RATIO: f32 = 0.7;
 
 fn json_from_response(body: &str) -> Result<Value> {
     lazy_static::lazy_static! {
@@ -134,6 +141,7 @@ fn emit_progress(handler: &Option<FactProgressCallback>, stage: &'static str, da
 
 pub async fn run_fact_check_pipeline(
     settings: &Settings,
+    embedder: Option<&Embedder>,
     query: &str,
     context: &str,
     progress: Option<FactProgressCallback>,
@@ -144,6 +152,34 @@ pub async fn run_fact_check_pipeline(
     let mut directives: Option<String> = None;
     let mut llm_info = LlmInfo::default();
     let mut final_answer = String::new();
+    let context_sentences: Vec<String> = extract_sentences(context)
+        .into_iter()
+        .filter(|s| s.chars().count() >= MIN_CONTEXT_SENTENCE_CHARS)
+        .take(MAX_CONTEXT_SENTENCES)
+        .collect();
+    let context_embeddings: Option<Vec<Vec<f32>>> = if let Some(model) = embedder {
+        if context_sentences.is_empty() {
+            None
+        } else {
+            match model
+                .embed(context_sentences.iter().map(|s| s.as_str()))
+                .await
+            {
+                Ok(vectors) => Some(
+                    vectors
+                        .into_iter()
+                        .map(normalize_embedding)
+                        .collect::<Vec<_>>(),
+                ),
+                Err(err) => {
+                    warn!("context embedding failed: {:?}", err);
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     emit_progress(
         &progress,
@@ -185,7 +221,14 @@ pub async fn run_fact_check_pipeline(
                 "ai_check": ai_check,
             }),
         );
-        let claim_check = claim_check(context, &final_answer, threshold);
+        let claim_check = claim_check(
+            embedder,
+            context_embeddings.as_deref(),
+            &context_sentences,
+            &final_answer,
+            threshold,
+        )
+        .await;
         emit_progress(
             &progress,
             "fact_claims",
@@ -422,8 +465,13 @@ fn parse_fact_check_response(content: &str) -> FactAiCheck {
     }
 }
 
-fn claim_check(context: &str, answer: &str, threshold: f32) -> ClaimCheckResult {
-    let context_sentences = extract_sentences(context);
+async fn claim_check(
+    embedder: Option<&Embedder>,
+    context_embeddings: Option<&[Vec<f32>]>,
+    context_sentences: &[String],
+    answer: &str,
+    threshold: f32,
+) -> ClaimCheckResult {
     let claims = generate_claims(answer);
 
     if context_sentences.is_empty() {
@@ -450,20 +498,88 @@ fn claim_check(context: &str, answer: &str, threshold: f32) -> ClaimCheckResult 
         };
     }
 
+    if let (Some(model), Some(ctx_vectors)) = (embedder, context_embeddings) {
+        match model.embed(claims.iter().map(|c| c.as_str())).await {
+            Ok(raw_vectors) => {
+                let claim_vectors: Vec<Vec<f32>> =
+                    raw_vectors.into_iter().map(normalize_embedding).collect();
+                return evaluate_claims_with_embeddings(
+                    &claims,
+                    context_sentences,
+                    ctx_vectors,
+                    &claim_vectors,
+                    threshold,
+                );
+            }
+            Err(err) => {
+                warn!("claim embedding failed: {:?}", err);
+            }
+        }
+    }
+
+    lexical_claim_check(context_sentences, &claims, threshold)
+}
+
+fn evaluate_claims_with_embeddings(
+    claims: &[String],
+    context_sentences: &[String],
+    context_embeddings: &[Vec<f32>],
+    claim_embeddings: &[Vec<f32>],
+    threshold: f32,
+) -> ClaimCheckResult {
     let mut records = Vec::with_capacity(claims.len());
     let mut entailed = 0usize;
-    let mut sum_scores = 0.0f32;
     let mut failing_details = None;
 
-    for claim in claims {
-        let (best_idx, best_context, best_score) = best_context_match(&claim, &context_sentences);
+    for (idx, claim_vec) in claim_embeddings.iter().enumerate() {
+        let (best_idx, best_score) = best_embedding_match(claim_vec, context_embeddings);
+        let best_context = context_sentences
+            .get(best_idx)
+            .map(|s| s.as_str())
+            .unwrap_or("");
         let label = classify_similarity(best_score, threshold);
         if label == "entailment" {
             entailed += 1;
         } else if failing_details.is_none() {
             failing_details = Some(format!(
                 "Claim '{}' not fully supported by context '{}'.",
-                truncate(&claim, 160),
+                truncate(&claims[idx], 160),
+                truncate(best_context, 160)
+            ));
+        }
+
+        records.push(ClaimCheckClaim {
+            claim: claims[idx].clone(),
+            context: best_context.to_string(),
+            context_index: best_idx,
+            label: label.to_string(),
+            entailment_probability: best_score,
+            neutral_probability: (1.0 - best_score).clamp(0.0, 1.0) * 0.6,
+            contradiction_probability: (1.0 - best_score).clamp(0.0, 1.0) * 0.4,
+        });
+    }
+
+    finalize_claim_check(records, entailed, threshold, failing_details)
+}
+
+fn lexical_claim_check(
+    context_sentences: &[String],
+    claims: &[String],
+    threshold: f32,
+) -> ClaimCheckResult {
+    let mut records = Vec::with_capacity(claims.len());
+    let mut entailed = 0usize;
+    let mut failing_details = None;
+
+    for claim in claims {
+        let (best_idx, best_context, best_score) = best_context_match(claim, context_sentences);
+        let label = classify_similarity(best_score, threshold * 0.9);
+        if label == "entailment" {
+            entailed += 1;
+        } else if failing_details.is_none() {
+            failing_details = Some(format!(
+                "Claim '{}' not fully supported by context '{}'.",
+                truncate(claim, 160),
                 truncate(best_context, 160)
             ));
         }
@@ -474,18 +590,35 @@ fn claim_check(context: &str, answer: &str, threshold: f32) -> ClaimCheckResult 
             context_index: best_idx,
             label: label.to_string(),
             entailment_probability: best_score,
-            neutral_probability: (1.0 - best_score) * 0.6,
-            contradiction_probability: (1.0 - best_score) * 0.4,
+            neutral_probability: (1.0 - best_score).clamp(0.0, 1.0) * 0.6,
+            contradiction_probability: (1.0 - best_score).clamp(0.0, 1.0) * 0.4,
         });
-        sum_scores += best_score;
     }
 
+    finalize_claim_check(records, entailed, threshold, failing_details)
+}
+
+fn finalize_claim_check(
+    records: Vec<ClaimCheckClaim>,
+    entailed: usize,
+    threshold: f32,
+    failing_details: Option<String>,
+) -> ClaimCheckResult {
     let avg_score = if records.is_empty() {
         0.0
     } else {
-        sum_scores / records.len() as f32
+        records
+            .iter()
+            .map(|r| r.entailment_probability)
+            .sum::<f32>()
+            / records.len() as f32
     };
-    let passed = !records.is_empty() && avg_score >= threshold;
+    let coverage = if records.is_empty() {
+        0.0
+    } else {
+        entailed as f32 / records.len() as f32
+    };
+    let passed = (!records.is_empty() && avg_score >= threshold) || coverage >= COVERAGE_PASS_RATIO;
 
     ClaimCheckResult {
         score: avg_score,
@@ -494,8 +627,40 @@ fn claim_check(context: &str, answer: &str, threshold: f32) -> ClaimCheckResult 
         threshold,
         passed,
         claims: records,
-        details: if passed { None } else { failing_details },
+        details: if passed {
+            None
+        } else {
+            failing_details
+                .or_else(|| Some("AI response could not be validated after retries.".to_string()))
+        },
     }
+}
+
+fn normalize_embedding(vec: Vec<f32>) -> Vec<f32> {
+    let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
+    vec.into_iter().map(|v| v / norm).collect()
+}
+
+fn best_embedding_match(claim: &[f32], contexts: &[Vec<f32>]) -> (usize, f32) {
+    let mut best_idx = 0usize;
+    let mut best_score = -1.0f32;
+    for (idx, ctx) in contexts.iter().enumerate() {
+        let score = cosine_similarity(claim, ctx);
+        if score > best_score {
+            best_score = score;
+            best_idx = idx;
+        }
+    }
+    (best_idx, best_score.max(0.0).min(1.0))
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    let mut dot = 0.0f32;
+    for i in 0..len {
+        dot += a[i] * b[i];
+    }
+    dot
 }
 
 fn build_retry_directives(ai_check: &FactAiCheck, claim_check: &ClaimCheckResult) -> String {
@@ -569,7 +734,7 @@ fn best_context_match<'a>(claim: &str, sentences: &'a [String]) -> (usize, &'a s
         if score > best_score {
             best_score = score;
             best_idx = idx;
-            best_sentence = sentence;
+            best_sentence = sentence.as_str();
         }
     }
     (best_idx, best_sentence, best_score)
@@ -624,7 +789,9 @@ fn generate_claims(answer: &str) -> Vec<String> {
                 .trim()
                 .to_string()
         })
-        .filter(|s| s.split_whitespace().count() >= 5 && s.chars().count() >= 20)
+        .filter(|s| s.split_whitespace().count() >= MIN_CLAIM_WORDS)
+        .filter(|s| s.chars().count() >= MIN_CLAIM_CHARS)
+        .take(MAX_CLAIMS)
         .collect()
 }
 
@@ -706,10 +873,15 @@ mod tests {
 
         let settings = test_settings(format!("http://{}", addr));
         let context = "Lecture 1 Slide 2 discusses the capital city of Italy, which is Rome.";
-        let result =
-            run_fact_check_pipeline(&settings, "What is the capital of Italy?", context, None)
-                .await
-                .unwrap();
+        let result = run_fact_check_pipeline(
+            &settings,
+            None,
+            "What is the capital of Italy?",
+            context,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.fact_check.status, "passed");
         assert_eq!(result.fact_check.attempts.len(), 1);
