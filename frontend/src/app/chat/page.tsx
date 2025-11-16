@@ -218,6 +218,35 @@ function resolveFileUrl(raw: unknown): string | null {
   }
 }
 
+function rawFileUrlFromMeta(meta: any): string | null {
+  if (!meta || typeof meta !== "object") return null;
+  const candidates = [
+    meta.FILE_URL,
+    meta.file_url,
+    meta.fileUrl,
+    meta.url,
+  ];
+  for (const entry of candidates) {
+    if (typeof entry === "string" && entry.trim()) {
+      return entry.trim();
+    }
+  }
+  return null;
+}
+
+function rawFileUrlFromHit(hit?: Hit | null): string | null {
+  if (!hit) return null;
+  if (typeof hit.file_url === "string" && hit.file_url.trim()) {
+    return hit.file_url.trim();
+  }
+  return rawFileUrlFromMeta(hit.metadata);
+}
+
+function resolvedFileUrlFromHit(hit?: Hit | null): string | null {
+  const raw = rawFileUrlFromHit(hit);
+  return raw ? resolveFileUrl(raw) : null;
+}
+
 function labelFromMeta(md: any) {
   if (!md) return "";
   if (md.slide_no != null && md.lecture_key) {
@@ -322,6 +351,42 @@ function toCiteLinks(text: string, hits: Hit[]) {
     rewritten = rewritten.replace(pattern, replacement);
   }
   return rewritten;
+}
+
+type SourceGroup = {
+  key: string;
+  label: string;
+  directUrl: string | null;
+  hits: Hit[];
+  order: number;
+};
+
+function buildSourceGroups(hits: Hit[]) {
+  const groups = new Map<string, SourceGroup>();
+  hits.forEach((hit, idx) => {
+    if (!hit) return;
+    const directUrl = resolvedFileUrlFromHit(hit);
+    const citation = normalizeCitationLabel(hit.citation ?? "");
+    const label =
+      citation || labelFromMeta(hit.metadata) || `Context ${idx + 1}`;
+    const key = directUrl || citation || label || `hit-${idx}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.hits.push(hit);
+      if (!existing.directUrl && directUrl) {
+        existing.directUrl = directUrl;
+      }
+      return;
+    }
+    groups.set(key, {
+      key,
+      label,
+      directUrl,
+      hits: [hit],
+      order: idx,
+    });
+  });
+  return Array.from(groups.values()).sort((a, b) => a.order - b.order);
 }
 
 type ChunkMatch = {
@@ -605,7 +670,9 @@ type CitationLinkProps = {
 };
 
 function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
+  const wrapperRef = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const preview = useMemo(() => {
     const chunk = hit?.text;
     if (!chunk) return "";
@@ -616,6 +683,27 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
       ? `${trimmed.slice(0, limit)}…`
       : trimmed;
   }, [hit?.text]);
+  const directUrl = useMemo(() => resolvedFileUrlFromHit(hit), [hit]);
+  const searchHint = useMemo(() => {
+    if (!hit?.text) return "";
+    return selectSearchSeed(hit.text);
+  }, [hit?.text]);
+
+  useEffect(() => {
+    setActionsOpen(false);
+  }, [hit?.id]);
+
+  useEffect(() => {
+    if (!actionsOpen) return;
+    if (typeof document === "undefined") return;
+    const handler = (event: MouseEvent) => {
+      if (!wrapperRef.current?.contains(event.target as Node)) {
+        setActionsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [actionsOpen]);
 
   if (!hit) {
     return <>{children}</>;
@@ -630,10 +718,26 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
   const handleClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
     event.preventDefault();
     setOpen(false);
+    setActionsOpen(false);
     onOpenCitation(hit);
   };
 
   const showPreview = open && preview;
+
+  const toggleActions: React.MouseEventHandler<HTMLButtonElement> = (event) => {
+    event.preventDefault();
+    setActionsOpen((prev) => !prev);
+  };
+
+  const handleOpenFile: React.MouseEventHandler<HTMLButtonElement> = (event) => {
+    event.preventDefault();
+    if (directUrl) {
+      window.open(directUrl, "_blank", "noopener");
+      setActionsOpen(false);
+    }
+  };
+
+  const hintText = searchHint ? truncateMiddle(searchHint, 80) : "";
 
   const openPreview = () => {
     if (preview) {
@@ -643,7 +747,7 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
   const closePreview = () => setOpen(false);
 
   return (
-    <span className="relative inline-flex">
+    <span ref={wrapperRef} className="relative inline-flex items-center gap-1">
       <button
         type="button"
         className={className}
@@ -657,6 +761,14 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
       >
         {children}
       </button>
+      <button
+        type="button"
+        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-indigo-400/40 bg-indigo-500/10 text-[10px] font-semibold text-indigo-100 transition hover:bg-indigo-500/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300"
+        onClick={toggleActions}
+        aria-label="Citation options"
+      >
+        ⌘F
+      </button>
       {showPreview && (
         <div
           role="tooltip"
@@ -667,6 +779,45 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
           <div className="max-h-80 overflow-y-auto whitespace-pre-wrap text-neutral-100">
             {preview}
           </div>
+        </div>
+      )}
+      {actionsOpen && (
+        <div className="absolute left-1/2 top-full z-40 mt-2 w-72 -translate-x-1/2 rounded-2xl border border-neutral-800 bg-neutral-950/95 p-3 text-left text-xs shadow-2xl">
+          <div className="text-[11px] text-neutral-400">
+            Instantly open this source and run a Ctrl/Cmd+F style search.
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleClick}
+              className="rounded-lg border border-indigo-400/40 bg-indigo-500/15 px-2.5 py-1 text-[11px] font-semibold text-indigo-100 hover:bg-indigo-500/25"
+            >
+              Auto-find evidence
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenFile}
+              disabled={!directUrl}
+              className="rounded-lg border border-neutral-700/70 px-2.5 py-1 text-[11px] font-semibold text-neutral-100 disabled:opacity-40 hover:bg-neutral-800"
+            >
+              Open FILE_URL
+            </button>
+          </div>
+          {directUrl && (
+            <div className="mt-2 break-all text-[11px] text-neutral-500">
+              {directUrl}
+            </div>
+          )}
+          {hintText && (
+            <div className="mt-1 text-[11px] text-neutral-500">
+              Try searching for “{hintText}”.
+            </div>
+          )}
+          {preview && (
+            <div className="mt-2 rounded-xl border border-neutral-800 bg-neutral-900/70 p-2 text-[11px] text-neutral-200">
+              {preview}
+            </div>
+          )}
         </div>
       )}
     </span>
@@ -1330,12 +1481,7 @@ export default function ChatPage() {
   async function openCitation(hit: Hit) {
     if (!hit) return;
     const meta = hit.metadata || {};
-    const rawUrl =
-      (typeof hit.file_url === "string" && hit.file_url) ||
-      (typeof meta.FILE_URL === "string" && meta.FILE_URL) ||
-      (typeof meta.file_url === "string" && meta.file_url) ||
-      (typeof meta.fileUrl === "string" && meta.fileUrl);
-    const directUrl = resolveFileUrl(rawUrl);
+    const directUrl = resolvedFileUrlFromHit(hit);
     const chunkText = hit.text || "";
     const citationLabel =
       normalizeCitationLabel(hit.citation ?? "") ||
@@ -2378,6 +2524,7 @@ function ChatTurn({
 
   const allHits = msg.hits || [];
   const hits = allHits.slice(0, 3);
+  const sourceGroups = useMemo(() => buildSourceGroups(hits).slice(0, 3), [hits]);
   const factCheck = msg.fact_check;
   const factAttempts = factCheck?.attempts ?? [];
   const lastAttempt = factAttempts[factAttempts.length - 1];
@@ -2493,42 +2640,89 @@ function ChatTurn({
           </div>
         )}
 
-        {/* per-message sources (assistant only, max 3) */}
-        {!isUser && hits.length > 0 && (
+        {/* per-message sources (assistant only, grouped) */}
+        {!isUser && sourceGroups.length > 0 && (
           <div className="mt-3 border-t border-neutral-800 pt-2">
             <div className="text-xs font-semibold text-neutral-300 mb-2">
               Sources
             </div>
             <p className="text-[11px] text-neutral-400 mb-2">
-              Click a citation in the answer or below to open the source in a popup.
-              We automatically run a Ctrl/Cmd+F style search on the lecture file so
-              you can verify the quote in context instantly.
+              Click any citation or evidence button to auto-open the lecture file
+              and run a Ctrl/Cmd+F style search exactly where the claim appears.
             </p>
-            <div className="space-y-2">
-              {hits.map((h, idx) => {
-                const label =
-                  (h.citation && normalizeCitationLabel(h.citation)) ||
-                  labelFromMeta(h.metadata) ||
-                  "Context";
-                const evidence = formatEvidenceSnippet(h.text || "");
-                return (
-                  <button
-                    key={idx}
-                    type="button"
-                    className="evidence-hover w-full rounded-xl border border-indigo-400/30 bg-neutral-900/70 p-3 text-left text-xs transition hover:bg-indigo-500/10"
-                    onClick={() => onOpenCitation(h)}
-                    data-evidence={
-                      evidence ? `Evidence snippet: ${evidence}` : undefined
-                    }
-                    aria-label={`Open source ${label}`}
-                  >
+            <div className="space-y-3">
+              {sourceGroups.map((group) => (
+                <div
+                  key={group.key}
+                  className="rounded-2xl border border-indigo-400/25 bg-neutral-900/70 p-3"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="font-mono text-indigo-200">
-                      {label}
+                      {group.label}
                     </div>
-                    <div className="text-neutral-300 line-clamp-3">{h.text}</div>
-                  </button>
-                );
-              })}
+                    {group.directUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (group.directUrl) {
+                            window.open(group.directUrl, "_blank", "noopener");
+                          }
+                        }}
+                        className="rounded-lg border border-neutral-700/70 px-2 py-0.5 text-[11px] text-neutral-200 hover:bg-neutral-800"
+                      >
+                        Open FILE_URL
+                      </button>
+                    )}
+                  </div>
+                  {group.directUrl && (
+                    <div className="mt-1 break-all text-[11px] text-neutral-500">
+                      {group.directUrl}
+                    </div>
+                  )}
+                  <div className="mt-2 text-[11px] text-neutral-400">
+                    Use the buttons below to jump between each evidence snippet.
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {group.hits.map((h, idx) => {
+                      const evidence = formatEvidenceSnippet(h.text || "");
+                      const label =
+                        group.hits.length > 1
+                          ? `Evidence ${idx + 1}`
+                          : "View evidence";
+                      return (
+                        <button
+                          key={`${group.key}-${idx}`}
+                          type="button"
+                          className="evidence-hover rounded-full border border-indigo-400/40 bg-indigo-500/15 px-3 py-1 text-[11px] font-semibold text-indigo-100 transition hover:bg-indigo-500/25"
+                          onClick={() => onOpenCitation(h)}
+                          data-evidence={
+                            evidence ? `Evidence snippet: ${evidence}` : undefined
+                          }
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2 space-y-1 text-[12px] text-neutral-300">
+                    {group.hits.map((h, idx) => {
+                      const snippet = formatEvidenceSnippet(h.text || "", 200);
+                      if (!snippet) return null;
+                      return (
+                        <div
+                          key={`${group.key}-snippet-${idx}`}
+                          className="line-clamp-2"
+                        >
+                          <span className="text-neutral-500">
+                            Evidence {idx + 1}:
+                          </span>{" "}
+                          {snippet}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}
