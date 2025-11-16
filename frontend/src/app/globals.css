@@ -29,16 +29,20 @@ body {
   position: relative;
   border-bottom: 2px dotted currentColor;
   cursor: help;
+  padding: 0.1rem 0.2rem;
+  border-radius: 0.45rem;
 }
 
 .claim-chip--verified {
   color: inherit;
   border-color: #34d399;
+  background: rgba(52, 211, 153, 0.12);
 }
 
 .claim-chip--unverified {
   color: inherit;
   border-color: #f87171;
+  background: rgba(248, 113, 113, 0.15);
 }
 
 .claim-chip::after {
@@ -63,5 +67,40 @@ body {
 
 .claim-chip:hover::after,
 .claim-chip:focus-visible::after {
+  opacity: 1;
+}
+
+.citation-chip {
+  position: relative;
+  border-radius: 999px;
+  box-shadow: 0 10px 25px rgba(79, 70, 229, 0.2);
+}
+
+.citation-chip::after {
+  content: attr(data-preview);
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -0.35rem);
+  bottom: 100%;
+  background: rgba(15, 17, 22, 0.98);
+  color: #f8fafc;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  box-shadow: 0 12px 45px rgba(0, 0, 0, 0.5);
+  white-space: pre-wrap;
+  max-width: min(380px, 80vw);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 60;
+}
+
+.citation-chip[data-preview=""]::after {
+  display: none;
+}
+
+.citation-chip:hover::after,
+.citation-chip:focus-visible::after {
   opacity: 1;
 }

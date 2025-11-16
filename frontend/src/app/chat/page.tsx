@@ -282,11 +282,24 @@ type ChunkMatch = {
   query: string;
 };
 
-type CitationViewerState = {
+type BaseCitationViewerState = {
   citation: string;
   fileUrl: string | null;
+  chunk: string;
+  searchQueries: string[];
+};
+
+type TextCitationViewerState = BaseCitationViewerState & {
+  mode: "text";
   html: string;
 };
+
+type PdfCitationViewerState = BaseCitationViewerState & {
+  mode: "pdf";
+  pdfUrl: string;
+};
+
+type CitationViewerState = TextCitationViewerState | PdfCitationViewerState;
 
 function escapeHtml(value: string) {
   return value
@@ -341,6 +354,17 @@ function buildChunkVariants(chunk: string): string[] {
     .map((v) => v.trim())
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
+}
+
+function buildPdfViewerUrl(url: string, search: string | null) {
+  if (!search) return url;
+  const hashIndex = url.indexOf("#");
+  const base = hashIndex === -1 ? url : url.slice(0, hashIndex);
+  const hash = hashIndex === -1 ? "" : url.slice(hashIndex + 1);
+  const params = new URLSearchParams(hash);
+  params.set("search", search);
+  const nextHash = params.toString();
+  return `${base}#${nextHash}`;
 }
 
 function locateVariant(normalizedDoc: string, variant: string): ChunkMatch | null {
@@ -544,7 +568,6 @@ type CitationLinkProps = {
 };
 
 function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
-  const [open, setOpen] = useState(false);
   const preview = useMemo(() => {
     const chunk = hit?.text;
     if (!chunk) return "";
@@ -561,51 +584,25 @@ function CitationLink({ hit, onOpenCitation, children }: CitationLinkProps) {
   }
 
   const className =
-    "inline-flex items-center text-indigo-300 underline decoration-dotted " +
-    "hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 " +
+    "citation-chip inline-flex items-center gap-1 rounded-full border border-indigo-500/40 " +
+    "bg-indigo-500/10 px-2 py-0.5 text-[13px] font-medium text-indigo-200 shadow-[0_0_20px_rgba(79,70,229,0.15)] " +
+    "transition hover:bg-indigo-500/20 focus-visible:outline focus-visible:outline-2 " +
     "focus-visible:outline-offset-2 focus-visible:outline-indigo-400";
 
   const handleClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
     event.preventDefault();
-    setOpen(false);
     onOpenCitation(hit);
   };
 
-  const showPreview = open && preview;
-
-  const openPreview = () => {
-    if (preview) {
-      setOpen(true);
-    }
-  };
-  const closePreview = () => setOpen(false);
-
   return (
-    <span className="relative inline-flex">
-      <button
-        type="button"
-        className={className}
-        onClick={handleClick}
-        onMouseEnter={openPreview}
-        onMouseLeave={closePreview}
-        onFocus={openPreview}
-        onBlur={closePreview}
-      >
-        {children}
-      </button>
-      {showPreview && (
-        <div
-          role="tooltip"
-          onMouseEnter={openPreview}
-          onMouseLeave={closePreview}
-          className="absolute left-1/2 z-30 mt-2 w-80 -translate-x-1/2 rounded-xl border border-neutral-800 bg-neutral-900/95 p-3 text-left text-xs shadow-2xl"
-        >
-          <div className="max-h-80 overflow-y-auto whitespace-pre-wrap text-neutral-100">
-            {preview}
-          </div>
-        </div>
-      )}
-    </span>
+    <button
+      type="button"
+      className={className}
+      onClick={handleClick}
+      data-preview={preview}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -697,6 +694,42 @@ function createClaimHighlighter(claims: ClaimCheckEntry[]) {
       });
     };
   };
+}
+
+function EvidenceSnippet({
+  text,
+  query,
+}: {
+  text?: string | null;
+  query?: string | null;
+}) {
+  const snippet = (text || "").trim();
+  if (!snippet) {
+    return <span className="text-neutral-500">No excerpt provided.</span>;
+  }
+  const limited = snippet.length > 420 ? `${snippet.slice(0, 420)}…` : snippet;
+  const focus = (query || "").trim();
+  if (!focus) {
+    return <>{limited}</>;
+  }
+  const lowerText = limited.toLowerCase();
+  const lowerQuery = focus.toLowerCase();
+  const idx = lowerText.indexOf(lowerQuery);
+  if (idx === -1) {
+    return <>{limited}</>;
+  }
+  const before = limited.slice(0, idx);
+  const match = limited.slice(idx, idx + focus.length);
+  const after = limited.slice(idx + focus.length);
+  return (
+    <>
+      {before}
+      <mark className="rounded bg-amber-400/30 px-0.5 text-amber-100">
+        {match}
+      </mark>
+      {after}
+    </>
+  );
 }
 
 function LectureRef({
@@ -1281,6 +1314,32 @@ export default function ChatPage() {
         return;
       }
       const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      const isPdf =
+        contentType.includes("pdf") || directUrl.toLowerCase().includes(".pdf");
+      const chunkText = hit.text || "";
+      const searchQueries = buildProgressiveQueries(chunkText);
+      const citationLabel =
+        normalizeCitationLabel(hit.citation ?? "") ||
+        labelFromMeta(meta) ||
+        "Source";
+
+      if (isPdf) {
+        const searchFocus = searchQueries[0] || chunkText.slice(0, 80);
+        const pdfUrl = buildPdfViewerUrl(
+          directUrl,
+          searchFocus ? truncateMiddle(searchFocus, 180) : null
+        );
+        setCitationViewer({
+          mode: "pdf",
+          citation: citationLabel,
+          fileUrl: directUrl,
+          pdfUrl,
+          chunk: chunkText,
+          searchQueries,
+        });
+        return;
+      }
+
       const isText =
         /text|json|csv|markdown|html|xml/.test(contentType) ||
         directUrl.toLowerCase().endsWith(".txt") ||
@@ -1292,22 +1351,21 @@ export default function ChatPage() {
       }
 
       const text = await res.text();
-      const match = findChunkMatch(text, hit.text || "");
-      const citationLabel =
-        normalizeCitationLabel(hit.citation ?? "") ||
-        labelFromMeta(meta) ||
-        "Source";
+      const match = findChunkMatch(text, chunkText);
       const html = buildDocumentHtml({
         citation: citationLabel,
         fileUrl: directUrl,
         docText: text,
         match,
-        chunk: hit.text || "",
+        chunk: chunkText,
       });
       setCitationViewer({
+        mode: "text",
         citation: citationLabel,
         fileUrl: directUrl,
         html,
+        chunk: chunkText,
+        searchQueries,
       });
     } catch (err) {
       console.error("Failed to open citation", err);
@@ -1928,11 +1986,58 @@ export default function ChatPage() {
                 </button>
               </div>
             </div>
-            <iframe
-              title="Citation source preview"
-              srcDoc={citationViewer.html}
-              className="mt-4 h-[70vh] w-full rounded-xl border border-neutral-800 bg-black"
-            />
+            <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)]">
+              <div className="rounded-2xl border border-neutral-800 bg-black/60 p-1">
+                {citationViewer.mode === "pdf" ? (
+                  <iframe
+                    key={citationViewer.pdfUrl}
+                    title="Citation PDF preview"
+                    src={citationViewer.pdfUrl}
+                    className="h-[70vh] w-full rounded-xl border border-neutral-900 bg-black"
+                  />
+                ) : (
+                  <iframe
+                    key={citationViewer.html}
+                    title="Citation source preview"
+                    srcDoc={citationViewer.html}
+                    className="h-[70vh] w-full rounded-xl border border-neutral-900 bg-black"
+                  />
+                )}
+              </div>
+              <aside className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-950/60 p-4 text-sm text-neutral-200">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                    Auto evidence search
+                  </div>
+                  <p className="mt-1 text-neutral-400">
+                    We seed the in-page viewer with the snippet used to answer the
+                    question and progressively search until we find a match.
+                    If the highlight is missing, press Ctrl/Cmd+F and try one of
+                    these phrases.
+                  </p>
+                  {citationViewer.searchQueries.length > 0 && (
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-indigo-200">
+                      {citationViewer.searchQueries.slice(0, 4).map((phrase, i) => (
+                        <li key={`phrase-${i}`}>
+                          “{truncateMiddle(phrase, 160)}”
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                    Evidence chunk preview
+                  </div>
+                  <div className="mt-1 rounded-xl border border-neutral-800 bg-neutral-900/70 p-3 text-neutral-100">
+                    <EvidenceSnippet
+                      text={citationViewer.chunk}
+                      query={citationViewer.searchQueries[0]}
+                    />
+                  </div>
+                </div>
+              </aside>
+            </div>
           </div>
         </div>
       )}
@@ -2396,24 +2501,34 @@ function ChatTurn({
               you can verify the quote in context instantly.
             </p>
             <div className="space-y-2">
-              {hits.map((h, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  className="w-full text-left text-xs border border-neutral-800 rounded-xl p-2 hover:bg-neutral-800/40"
-                  onClick={() => onOpenCitation(h)}
-                  title={
-                    h.text ? h.text.replace(/\s+/g, " ").trim() : undefined
-                  }
-                >
-                  <div className="font-mono text-neutral-300">
-                    {(h.citation && normalizeCitationLabel(h.citation)) ||
-                      labelFromMeta(h.metadata) ||
-                      "Context"}
-                  </div>
-                  <div className="text-neutral-400 line-clamp-3">{h.text}</div>
-                </button>
-              ))}
+              {hits.map((h, idx) => {
+                const previewQuery = buildProgressiveQueries(h.text || "")[0] || "";
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    className="group w-full text-left text-xs rounded-2xl border border-indigo-500/30 bg-indigo-500/5 p-3 transition hover:bg-indigo-500/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
+                    onClick={() => onOpenCitation(h)}
+                    title={
+                      h.text ? h.text.replace(/\s+/g, " ").trim() : undefined
+                    }
+                  >
+                    <div className="flex items-center gap-2 font-mono text-indigo-200">
+                      <span className="inline-flex min-w-0 flex-1 truncate">
+                        {(h.citation && normalizeCitationLabel(h.citation)) ||
+                          labelFromMeta(h.metadata) ||
+                          "Context"}
+                      </span>
+                      <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[10px] uppercase tracking-wide text-indigo-100">
+                        View
+                      </span>
+                    </div>
+                    <div className="mt-1 text-neutral-200">
+                      <EvidenceSnippet text={h.text} query={previewQuery} />
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
