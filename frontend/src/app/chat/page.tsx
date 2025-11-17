@@ -404,8 +404,17 @@ function toCiteLinks(text: string, hits: Hit[]) {
     (a, b) => b[0].length - a[0].length
   );
   for (const [citation, id] of entries) {
-    const pattern = new RegExp(`\\[${escapeRegExp(citation)}\\]`, "g");
-    const replacement = `[${citation}](cite:${encodeURIComponent(id)})`;
+    const escaped = escapeRegExp(citation);
+    const escapedSub = escapeRegExp(citation.substring(1));
+
+    const pattern = new RegExp(
+      `\\[${escaped}\\]|${escaped}|${escapedSub}`,
+      "g"
+    );
+    const replacement = `[${citation
+      .replace("(", "")
+      .replace(")", "")}](cite:${encodeURIComponent(id)})`;
+
     rewritten = rewritten.replace(pattern, replacement);
   }
   return rewritten;
@@ -2486,7 +2495,6 @@ function ChatTurn({
           }}
           components={{
             a: ({ href, children, ...props }) => {
-              console.log("HREF: ", props, " | Citation: ", rewritten);
               if (href?.startsWith("cite:")) {
                 const payload = href.slice(5);
                 const id = decodeURIComponent(payload);
