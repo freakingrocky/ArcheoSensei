@@ -326,7 +326,17 @@ async fn answer_with_context(
     let mut system = "You are a precise tutor. Use ONLY the provided CONTEXT to answer."
         .to_string()
         + " Cite evidence inline using the original citation markers such as [Lecture X Slide Y]."
-        + " If the context is insufficient, say so explicitly.";
+        + " If the context is insufficient, say so explicitly."
+        + " When the context includes lecture image metadata (IMG_URL, TITLE, DESCRIPTION, NOTES, LECTURE, AREA_DESCRIPTION) you may embed a visual reference.";
+    system.push_str(
+        "\nTo embed an annotated image, emit a fenced code block labelled annotated-image that contains JSON like:\n"
+    );
+    system.push_str(
+        "```annotated-image\\n{\n  \"img_url\": \"https://...\",\n  \"title\": \"Temple Pediment\",\n  \"description\": \"Key scene\",\n  \"lecture\": \"Lecture 5\",\n  \"notes\": \"Use to discuss figure posture\",\n  \"highlights\": [\n    {\n      \"label\": \"Central Column\",\n      \"x\": 0.15,\n      \"y\": 0.1,\n      \"w\": 0.2,\n      \"h\": 0.4,\n      \"color\": \"#FFB020\",\n      \"help_text\": \"Weathering on column capital\"\n    }\n  ]\n}\n```\n"
+    );
+    system.push_str(
+        "Coordinates are normalized 0-1. Always pair each annotated-image block with surrounding prose that explains why the image matters and references the original slide citation."
+    );
     if let Some(extra) = directives.and_then(value_if_not_blank) {
         system.push_str(" Follow these directives carefully: ");
         system.push_str(&extra);

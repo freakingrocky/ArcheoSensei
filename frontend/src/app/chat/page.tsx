@@ -64,6 +64,25 @@ type QuizSessionSummary = {
   topicsCovered: string[];
 };
 
+type AnnotatedImageHighlight = {
+  label?: string;
+  color?: string;
+  help_text?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+type AnnotatedImageSpec = {
+  img_url: string;
+  title?: string;
+  description?: string;
+  lecture?: string;
+  notes?: string;
+  highlights: AnnotatedImageHighlight[];
+};
+
 function truncateMiddle(text: string, maxLength = 140) {
   if (!text) return "";
   if (text.length <= maxLength) return text;
@@ -171,6 +190,277 @@ const LOADING_LINES = [
   "Gathering thoughts…",
   "Just a second, truly a confounding question…",
 ];
+
+const HIGHLIGHT_COLORS = [
+  "#22d3ee",
+  "#f472b6",
+  "#facc15",
+  "#34d399",
+  "#c084fc",
+  "#fb923c",
+];
+
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function withAlpha(color: string | undefined, alphaHex = "33") {
+  if (!color || typeof color !== "string") {
+    return `#22d3ee${alphaHex}`;
+  }
+  const trimmed = color.trim();
+  if (!trimmed) return `#22d3ee${alphaHex}`;
+  if (trimmed.startsWith("#")) {
+    if (trimmed.length === 4 || trimmed.length === 7) {
+      return `${trimmed}${alphaHex}`;
+    }
+    return trimmed;
+  }
+  return trimmed;
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = parseFloat(value.trim());
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return null;
+}
+
+function normalizeHighlight(
+  raw: any,
+  idx: number
+): AnnotatedImageHighlight | null {
+  if (!raw || typeof raw !== "object") return null;
+  const base =
+    raw.bounds && typeof raw.bounds === "object" ? raw.bounds : raw.rect || raw;
+  const x = toNumber(base?.x ?? base?.left);
+  const y = toNumber(base?.y ?? base?.top);
+  const w = toNumber(base?.w ?? base?.width);
+  const h = toNumber(base?.h ?? base?.height);
+  if (x == null || y == null || w == null || h == null) {
+    return null;
+  }
+  if (w <= 0 || h <= 0) return null;
+  const color =
+    typeof raw?.color === "string" && raw.color.trim()
+      ? raw.color.trim()
+      : HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length];
+  const labelSource =
+    raw?.label || raw?.title || raw?.name || raw?.id || raw?.segment;
+  const helpSource =
+    raw?.help_text || raw?.notes || raw?.description || raw?.detail || raw?.tooltip;
+  return {
+    label:
+      typeof labelSource === "string" && labelSource.trim()
+        ? labelSource.trim()
+        : undefined,
+    help_text:
+      typeof helpSource === "string" && helpSource.trim()
+        ? helpSource.trim()
+        : undefined,
+    color,
+    x: clamp01(x),
+    y: clamp01(y),
+    w: clamp01(w),
+    h: clamp01(h),
+  };
+}
+
+function parseAreaDescription(value: unknown): AnnotatedImageHighlight[] {
+  if (!value) return [];
+  let payload = value;
+  if (typeof value === "string") {
+    try {
+      payload = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(payload)) return [];
+  const regions: AnnotatedImageHighlight[] = [];
+  payload.forEach((entry, idx) => {
+    const normalized = normalizeHighlight(entry, idx);
+    if (normalized) {
+      regions.push(normalized);
+    }
+  });
+  return regions;
+}
+
+function parseAnnotatedImageBlock(raw: string): AnnotatedImageSpec | null {
+  let data: any = null;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
+  const urlCandidate =
+    data.img_url ||
+    data.image_url ||
+    data.IMG_URL ||
+    data.url ||
+    data.src ||
+    data.source;
+  if (typeof urlCandidate !== "string") return null;
+  const imgUrl = urlCandidate.trim();
+  if (!imgUrl) return null;
+  const highlightsSource =
+    data.highlights ||
+    data.area_description ||
+    data.AREA_DESCRIPTION ||
+    data.areas ||
+    data.segments;
+  const highlights = parseAreaDescription(highlightsSource);
+  return {
+    img_url: imgUrl,
+    title: (data.title || data.TITLE)?.toString(),
+    description: (data.description || data.DESCRIPTION)?.toString(),
+    lecture: (data.lecture || data.LECTURE)?.toString(),
+    notes: (data.notes || data.NOTES)?.toString(),
+    highlights,
+  };
+}
+
+function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
+  const highlights = data.highlights || [];
+  const activeRegion =
+    activeIdx != null && highlights[activeIdx] ? highlights[activeIdx] : null;
+  const activeLeft = activeRegion
+    ? clamp01(activeRegion.x + activeRegion.w / 2)
+    : 0;
+  const activeTop = activeRegion ? clamp01(activeRegion.y) : 0;
+
+  return (
+    <figure className="my-4 overflow-hidden rounded-2xl border border-indigo-500/30 bg-neutral-950">
+      <div className="border-b border-indigo-500/20 px-4 py-3">
+        <div className="text-[11px] uppercase tracking-wide text-indigo-300">
+          Highlighted visual reference
+        </div>
+        <div className="text-lg font-semibold text-white">
+          {data.title?.trim() || "Lecture image"}
+        </div>
+        {(data.lecture || data.description) && (
+          <div className="text-sm text-neutral-300">
+            {data.lecture && <span>{data.lecture}</span>}
+            {data.lecture && data.description && <span className="mx-1">•</span>}
+            {data.description && <span>{data.description}</span>}
+          </div>
+        )}
+      </div>
+      <div className="relative bg-black">
+        <img
+          src={data.img_url}
+          alt={data.title || "Lecture image"}
+          loading="lazy"
+          className="mx-auto max-h-[460px] w-full object-contain"
+        />
+        {highlights.map((region, idx) => {
+          const left = region.x * 100;
+          const top = region.y * 100;
+          const width = region.w * 100;
+          const height = region.h * 100;
+          const color = region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length];
+          const fillColor = withAlpha(color);
+          return (
+            <button
+              key={`highlight-${idx}`}
+              type="button"
+              className="absolute z-10 rounded-md border-2 bg-white/5 transition focus:outline-none focus:ring-2 focus:ring-white/70"
+              style={{
+                left: `${left}%`,
+                top: `${top}%`,
+                width: `${width}%`,
+                height: `${height}%`,
+                borderColor: color,
+                backgroundColor: fillColor,
+              }}
+              onMouseEnter={() => setActiveIdx(idx)}
+              onMouseLeave={() =>
+                setActiveIdx((prev) => (prev === idx ? null : prev))
+              }
+              onFocus={() => setActiveIdx(idx)}
+              onBlur={() => setActiveIdx((prev) => (prev === idx ? null : prev))}
+              onClick={() => setActiveIdx(idx)}
+            >
+              <span className="sr-only">
+                {region.label || `Highlight ${idx + 1}`}
+              </span>
+            </button>
+          );
+        })}
+        {activeRegion && (
+          <div
+            className="pointer-events-none absolute z-20"
+            style={{
+              left: `${activeLeft * 100}%`,
+              top: `${activeTop * 100}%`,
+              transform: "translate(-50%, -110%)",
+            }}
+          >
+            <div
+              className="rounded-xl border bg-black/80 px-3 py-2 text-xs text-white shadow-xl"
+              style={{
+                borderColor:
+                  activeRegion.color || HIGHLIGHT_COLORS[activeIdx! % HIGHLIGHT_COLORS.length],
+              }}
+            >
+              <div className="font-semibold">
+                {activeRegion.label || `Highlight ${activeIdx! + 1}`}
+              </div>
+              {activeRegion.help_text && (
+                <div className="mt-1 max-w-xs text-neutral-200">
+                  {activeRegion.help_text}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="space-y-3 border-t border-indigo-500/20 px-4 py-3 text-sm text-neutral-200">
+        {data.notes && (
+          <p className="text-neutral-300">{data.notes}</p>
+        )}
+        {highlights.length > 0 && (
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-neutral-400">
+              Highlights
+            </div>
+            <ul className="mt-2 space-y-2 text-sm">
+              {highlights.map((region, idx) => (
+                <li key={`highlight-desc-${idx}`} className="flex gap-2">
+                  <span
+                    className="mt-1 h-2.5 w-2.5 rounded-full"
+                    style={{
+                      backgroundColor:
+                        region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length],
+                    }}
+                  />
+                  <div>
+                    <div className="font-semibold text-white">
+                      {region.label || `Highlight ${idx + 1}`}
+                    </div>
+                    {region.help_text && (
+                      <div className="text-xs text-neutral-300">
+                        {region.help_text}
+                      </div>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </figure>
+  );
+}
 
 function backendBase() {
   return (
@@ -2531,18 +2821,41 @@ function ChatTurn({
               return <>{children}</>;
             },
 
-            code: ({ inline, className, children, ...props }) =>
-              !inline ? (
-                <pre className="bg-neutral-950 border border-neutral-800 rounded-lg p-3 overflow-auto">
-                  <code className={className} {...props}>
-                    {children}
-                  </code>
-                </pre>
-              ) : (
+            code: ({ inline, className, children, ...props }) => {
+              if (!inline) {
+                const language = (className || "")
+                  .replace("language-", "")
+                  .trim()
+                  .toLowerCase();
+                if (language === "annotated-image") {
+                  const raw = Array.isArray(children)
+                    ? children
+                        .map((child) =>
+                          typeof child === "string"
+                            ? child
+                            : String(child ?? "")
+                        )
+                        .join("")
+                    : String(children ?? "");
+                  const parsed = parseAnnotatedImageBlock(raw.trim());
+                  if (parsed) {
+                    return <AnnotatedImageBlock data={parsed} />;
+                  }
+                }
+                return (
+                  <pre className="bg-neutral-950 border border-neutral-800 rounded-lg p-3 overflow-auto">
+                    <code className={className} {...props}>
+                      {children}
+                    </code>
+                  </pre>
+                );
+              }
+              return (
                 <code className="bg-neutral-800/70 rounded px-1.5 py-0.5">
                   {children}
                 </code>
-              ),
+              );
+            },
             table: (props) => (
               <table className="table-auto border-collapse" {...props} />
             ),
