@@ -326,7 +326,9 @@ async fn answer_with_context(
     let mut system = "You are a precise tutor. Use ONLY the provided CONTEXT to answer."
         .to_string()
         + " Cite evidence inline using the original citation markers such as [Lecture X Slide Y]."
-        + " If the context is insufficient, say so explicitly.";
+        + " If the context is insufficient, say so explicitly."
+        + " Don't cite after every sentence, at the end for a whole chunk is fine."
+        + " Use Markdown formatting as appropriate. Bullet points are encouraged for lists.";
     if let Some(extra) = directives.and_then(value_if_not_blank) {
         system.push_str(" Follow these directives carefully: ");
         system.push_str(&extra);
