@@ -450,7 +450,17 @@ pub async fn quiz_question(
         None,
     )
     .await?;
-    let context = retrieve::build_context(&retrieval.hits);
+    let priority_hits: Vec<_> = retrieval
+        .hits
+        .into_iter()
+        .filter(|hit| hit.priority == Some(1))
+        .collect();
+    if priority_hits.is_empty() {
+        return Err(ApiError(anyhow::anyhow!(
+            "No priority 1 documents available for quizzes"
+        )));
+    }
+    let context = retrieve::build_context(&priority_hits);
     let question =
         llm::generate_quiz_item(&state.settings, &context, &query, &question_type).await?;
     Ok(Json(QuizQuestionResponse {

@@ -39,6 +39,8 @@ pub struct RetrieveHit {
     pub text: String,
     pub metadata: serde_json::Value,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     pub citation: Option<String>,
     pub file_url: Option<String>,
     pub tag: Option<String>,
