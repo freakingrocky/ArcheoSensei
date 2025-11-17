@@ -141,6 +141,7 @@ pub async fn query(
         options.force_lecture_key.as_deref(),
         options.use_global,
         options.user_id.as_deref(),
+        None,
     )
     .await?;
     let context = retrieve::build_context(&hits);
@@ -201,6 +202,7 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
         options.force_lecture_key.as_deref(),
         options.use_global,
         options.user_id.as_deref(),
+        None,
     )
     .await;
     let retrieval = match result {
@@ -416,11 +418,35 @@ pub async fn get_source(
     })))
 }
 
+fn normalize_lecture_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 pub async fn quiz_question(
     State(state): State<AppState>,
     Json(payload): Json<QuizQuestionRequest>,
 ) -> Result<Json<QuizQuestionResponse>, ApiError> {
-    if payload.topic.is_none() && payload.lecture_key.is_none() {
+    let has_topic = payload
+        .topic
+        .as_ref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let has_lecture = payload
+        .lecture_keys
+        .as_ref()
+        .map(|keys| keys.iter().any(|key| normalize_lecture_key(key).is_some()))
+        .unwrap_or(false)
+        || payload
+            .lecture_key
+            .as_deref()
+            .map(|key| normalize_lecture_key(key).is_some())
+            .unwrap_or(false);
+    if !has_topic && !has_lecture {
         return Err(ApiError(anyhow::anyhow!("Provide a topic or lecture key")));
     }
     let mut question_type = payload
@@ -431,13 +457,29 @@ pub async fn quiz_question(
     if !allowed.contains(&question_type.as_str()) {
         question_type = "short_answer".to_string();
     }
+    let normalized_keys: Vec<String> = payload
+        .lecture_keys
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|key| normalize_lecture_key(&key))
+        .collect();
+    let lecture_cycle_index = payload.lecture_cycle_index.unwrap_or(0);
+    let selected_lecture = if !normalized_keys.is_empty() {
+        let idx = lecture_cycle_index % normalized_keys.len();
+        normalized_keys.get(idx).cloned()
+    } else if let Some(key) = payload.lecture_key.as_deref() {
+        normalize_lecture_key(key)
+    } else {
+        None
+    };
     let query = payload
         .topic
         .clone()
+        .filter(|topic| !topic.trim().is_empty())
         .or_else(|| {
-            payload
-                .lecture_key
-                .clone()
+            selected_lecture
+                .as_ref()
                 .map(|k| format!("Key ideas from {}", k))
         })
         .unwrap_or_else(|| "Key ideas from the course".to_string());
@@ -445,9 +487,10 @@ pub async fn quiz_question(
         &state.pool,
         &state.embedder,
         &query,
-        payload.lecture_key.as_deref(),
-        payload.lecture_key.is_none(),
+        selected_lecture.as_deref(),
+        selected_lecture.is_none(),
         None,
+        Some(1),
     )
     .await?;
     let context = retrieve::build_context(&retrieval.hits);
@@ -456,7 +499,7 @@ pub async fn quiz_question(
     Ok(Json(QuizQuestionResponse {
         question,
         context,
-        lecture_key: payload.lecture_key.clone(),
+        lecture_key: selected_lecture,
         topic: payload.topic.clone(),
     }))
 }

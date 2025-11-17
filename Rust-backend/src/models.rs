@@ -234,6 +234,8 @@ pub struct QuizQuestion {
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuizQuestionRequest {
     pub lecture_key: Option<String>,
+    pub lecture_keys: Option<Vec<String>>,
+    pub lecture_cycle_index: Option<usize>,
     pub topic: Option<String>,
     pub question_type: Option<String>,
 }
