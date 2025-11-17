@@ -19,7 +19,7 @@ async fn knn_store(
     limit: i64,
 ) -> anyhow::Result<Vec<RetrieveHit>> {
     let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
-                      d.\"Citation\", d.\"FILE_URL\" \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
                FROM chunks c \
                LEFT JOIN documents d ON d.id = c.doc_id \
                WHERE c.store_kind = $2 \
@@ -41,7 +41,7 @@ async fn knn_lecture(
     limit: i64,
 ) -> anyhow::Result<Vec<RetrieveHit>> {
     let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
-                      d.\"Citation\", d.\"FILE_URL\" \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
                FROM chunks c \
                LEFT JOIN documents d ON d.id = c.doc_id \
                WHERE c.store_kind = 2 AND c.metadata->>'lecture_key' = $2 \
@@ -62,6 +62,7 @@ fn row_to_hit(row: PgRow) -> RetrieveHit {
         text: row.get::<String, _>("text"),
         metadata: row.get::<serde_json::Value, _>("metadata"),
         score: row.get::<f64, _>("score") as f32,
+        priority: row.try_get::<Option<i32>, _>("priority").ok().flatten(),
         citation: row.try_get::<Option<String>, _>("Citation").ok().flatten(),
         file_url: row.try_get::<Option<String>, _>("FILE_URL").ok().flatten(),
         tag: None,
@@ -268,6 +269,7 @@ pub async fn retrieve(
                 text: row.get("text"),
                 metadata: row.get("metadata"),
                 score: row.get::<f64, _>("score") as f32,
+                priority: None,
                 citation: None,
                 file_url: None,
                 tag: None,
@@ -277,7 +279,11 @@ pub async fn retrieve(
         }
     }
 
-    merged.sort_by(|a, b| b.score.total_cmp(&a.score));
+    merged.sort_by(|a, b| {
+        let pa = a.priority.unwrap_or(i32::MAX);
+        let pb = b.priority.unwrap_or(i32::MAX);
+        pa.cmp(&pb).then_with(|| b.score.total_cmp(&a.score))
+    });
     let mut hits = merged;
     if hits.len() > 12 {
         hits.truncate(12);
@@ -319,6 +325,7 @@ mod tests {
             text: "example text".to_string(),
             metadata: json!({"lecture_key": "lec_1", "slide_no": 1}),
             score: 0.9,
+            priority: None,
             citation: Some("[Lecture 1 Slide 1]".to_string()),
             file_url: None,
             tag: None,
