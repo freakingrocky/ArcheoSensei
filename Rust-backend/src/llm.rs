@@ -328,7 +328,7 @@ async fn answer_with_context(
         + " Cite evidence inline using the original citation markers such as [Lecture X Slide Y]."
         + " If the context is insufficient, say so explicitly."
         + " Don't cite after every sentence, at the end for a whole chunk is fine."
-        + " Use Markdown formatting as appropriate. Bullet points are encouraged for lists.";
+        + " Use Markdown formatting as appropriate. Bullet points are encouraged for lists."
         + " When the context includes lecture image metadata (IMG_URL, TITLE, DESCRIPTION, NOTES, LECTURE, AREA_DESCRIPTION) you may embed a visual reference.";
     system.push_str(
         "\nTo embed an annotated image, emit a fenced code block labelled annotated-image that contains JSON like:\n"
