@@ -2639,12 +2639,12 @@ function ChatTurn({
                 {entailmentPct !== null && (
                   <>
                     {" "}
-                    · Evidence entailment {entailmentPct}%
+                    · Evidence entailment
                     {entailedClaims !== null &&
                       totalClaims !== null &&
                       ` (${entailedClaims}/${totalClaims} claims)`}
-                    {entailmentTarget !== null &&
-                      ` · target ${entailmentTarget}%`}
+                    {/* {entailmentTarget !== null &&
+                      ` · target ${entailmentTarget}%`} */}
                   </>
                 )}
               </div>
