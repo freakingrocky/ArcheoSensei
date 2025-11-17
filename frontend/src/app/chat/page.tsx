@@ -247,8 +247,7 @@ function labelFromMeta(md: any) {
   return "";
 }
 
-const DEFAULT_PDF_VIEWER_BASE =
-  "https://mozilla.github.io/pdf.js/web/viewer.html";
+const DEFAULT_PDF_VIEWER_BASE = "/pdfjs/web/viewer.html";
 const REGEX_ESCAPE = /[.*+?^${}()|[\]\\]/g;
 
 function escapeRegExp(value: string) {
@@ -272,6 +271,37 @@ function getPdfViewerBase() {
   return DEFAULT_PDF_VIEWER_BASE;
 }
 
+function selectCleanChunk(text: string): string {
+  if (!text) return "";
+
+  // Step 1. Split by real PDF line breaks
+  const lines = text.split(/\n+/);
+
+  const validPattern = /[A-Za-z0-9 .,']+/g;
+  let best = "";
+
+  for (let line of lines) {
+    // remove hyphenation ONLY if at end of line
+    line = line.replace(/-\s*$/, "");
+
+    // collapse whitespace
+    line = line.replace(/\s+/g, " ");
+
+    // get valid spans from this single line
+    const spans = line.match(validPattern);
+    if (!spans) continue;
+
+    for (const span of spans) {
+      const trimmed = span.trim();
+      if (trimmed.length > best.length) {
+        best = trimmed;
+      }
+    }
+  }
+
+  return best;
+}
+
 function selectSearchSeed(chunk: string) {
   const queries = buildProgressiveQueries(chunk);
   if (queries.length) {
@@ -290,9 +320,11 @@ function buildPdfViewerUrl(fileUrl: string, chunk: string) {
   if (!fileUrl) return null;
   const base = getPdfViewerBase();
   const encodedFile = encodeURIComponent(fileUrl);
-  const searchSeed = selectSearchSeed(chunk);
+  const searchSeed = selectCleanChunk(selectSearchSeed(chunk));
   const hash = searchSeed
-    ? `#search=${encodeURIComponent(searchSeed)}&phrase=true&caseSensitive=false`
+    ? `#search=${encodeURIComponent(
+        searchSeed
+      )}&phrase=true&caseSensitive=false`
     : "";
   return `${base}?file=${encodedFile}${hash}`;
 }
@@ -459,7 +491,10 @@ function buildChunkVariants(chunk: string): string[] {
     .sort((a, b) => b.length - a.length);
 }
 
-function locateVariant(normalizedDoc: string, variant: string): ChunkMatch | null {
+function locateVariant(
+  normalizedDoc: string,
+  variant: string
+): ChunkMatch | null {
   const escaped = escapeRegExp(variant);
   if (!escaped) return null;
   const pattern = escaped.replace(/\\s+/g, "\\s+");
@@ -509,10 +544,7 @@ function buildDocumentHtml({
   const safeCitation = escapeHtml(citation || "Source");
   const safeUrl = escapeHtml(fileUrl);
   const safeChunk = escapeHtml(chunk.trim());
-  const chunkWords = chunk
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+  const chunkWords = chunk.trim().split(/\s+/).filter(Boolean);
   const searchQueries = buildProgressiveQueries(chunk);
   const searchPreview = searchQueries
     .slice(0, 3)
@@ -720,7 +752,7 @@ function CitationLink({ hits, onOpenCitation, children }: CitationLinkProps) {
         onMouseLeave={closePreview}
         onFocus={openPreview}
         onBlur={closePreview}
-        data-evidence={preview ? `Evidence snippet: ${preview}` : undefined}
+        // data-evidence={preview ? `Evidence snippet: ${preview}` : undefined}
         aria-label={`Open citation${
           preview ? `: ${preview.slice(0, 80)}` : ""
         }`}
@@ -734,7 +766,7 @@ function CitationLink({ hits, onOpenCitation, children }: CitationLinkProps) {
           onMouseLeave={closePreview}
           className="absolute left-1/2 z-30 mt-2 w-80 -translate-x-1/2 rounded-xl border border-neutral-800 bg-neutral-900/95 p-3 text-left text-xs shadow-2xl"
         >
-          {preview && (
+          {/* {preview && (
             <div className="max-h-60 overflow-y-auto whitespace-pre-wrap text-neutral-100">
               {preview}
             </div>
@@ -752,38 +784,43 @@ function CitationLink({ hits, onOpenCitation, children }: CitationLinkProps) {
                 Open original
               </a>
             </div>
-          )}
-          {hits.length > 0 && (
+          )} */}
+          {/* {hits.length > 0 && (
             <div className="mt-3 text-[11px] text-neutral-400">
               Jump to a matching snippet — we’ll open the lecture file and run a
               Ctrl/Cmd+F search automatically.
             </div>
-          )}
+          )} */}
           {hits.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1">
-              {hits.map((candidate, idx) => {
-                if (!candidate) return null;
-                const snippet = formatEvidenceSnippet(candidate.text || "");
-                return (
-                  <button
-                    key={`${candidate.id ?? idx}`}
-                    type="button"
-                    className="rounded-full border border-indigo-400/40 bg-neutral-800/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-100 transition hover:bg-indigo-500/30"
-                    data-evidence={
-                      snippet ? `Evidence snippet: ${snippet}` : undefined
-                    }
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      setOpen(false);
-                      onOpenCitation(candidate);
-                    }}
-                    aria-label={`Open evidence ${idx + 1}`}
-                  >
-                    Evidence {idx + 1}
-                  </button>
-                );
-              })}
+              {hits
+                .filter(
+                  (hit, idx) =>
+                    idx === hits.findIndex((h) => h.text === hit.text)
+                )
+                .map((candidate, idx) => {
+                  if (!candidate) return null;
+                  const snippet = formatEvidenceSnippet(candidate.text || "");
+                  return (
+                    <button
+                      key={`${candidate.id ?? idx}`}
+                      type="button"
+                      className="rounded-full border border-indigo-400/40 bg-neutral-800/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-100 transition hover:bg-indigo-500/30"
+                      data-evidence={
+                        snippet ? `Evidence snippet: ${snippet}` : undefined
+                      }
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        setOpen(false);
+                        onOpenCitation(candidate);
+                      }}
+                      aria-label={`Open evidence ${idx + 1}`}
+                    >
+                      Evidence {idx + 1}
+                    </button>
+                  );
+                })}
             </div>
           )}
         </div>
@@ -957,7 +994,8 @@ export default function ChatPage() {
     text: string;
     image_url: string;
   } | null>(null);
-  const [citationViewer, setCitationViewer] = useState<CitationViewerState | null>(null);
+  const [citationViewer, setCitationViewer] =
+    useState<CitationViewerState | null>(null);
   const [citationLoading, setCitationLoading] = useState(false);
 
   // HUD
@@ -2133,8 +2171,8 @@ export default function ChatPage() {
                 {citationViewer.searchQuery && (
                   <div className="mt-4 rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3 text-xs text-indigo-100">
                     Automatically searching inside the PDF for “
-                    {citationViewer.searchQuery}”. Use the viewer search (⌘/Ctrl+F)
-                    if you need to refine further.
+                    {citationViewer.searchQuery}”. Use the viewer search
+                    (⌘/Ctrl+F) if you need to refine further.
                   </div>
                 )}
                 {citationViewer.chunkPreview && (
@@ -2442,8 +2480,13 @@ function ChatTurn({
       <div className="prose prose-invert max-w-none prose-p:my-2 prose-li:my-1">
         <ReactMarkdown
           remarkPlugins={remarkPlugins}
+          urlTransform={(url) => {
+            if (url.startsWith("cite:")) return url; // allow raw cite:...
+            return url; // fallback normal transform
+          }}
           components={{
             a: ({ href, children, ...props }) => {
+              console.log("HREF: ", props, " | Citation: ", rewritten);
               if (href?.startsWith("cite:")) {
                 const payload = href.slice(5);
                 const id = decodeURIComponent(payload);
@@ -2460,7 +2503,10 @@ function ChatTurn({
                   ? [hit]
                   : [];
                 return (
-                  <CitationLink hits={payloadHits} onOpenCitation={onOpenCitation}>
+                  <CitationLink
+                    hits={payloadHits}
+                    onOpenCitation={onOpenCitation}
+                  >
                     {children}
                   </CitationLink>
                 );
@@ -2642,9 +2688,9 @@ function ChatTurn({
               Sources
             </div>
             <p className="text-[11px] text-neutral-400 mb-2">
-              Click a citation in the answer or below to open the source in a popup.
-              We automatically run a Ctrl/Cmd+F style search on the lecture file so
-              you can verify the quote in context instantly.
+              Click a citation in the answer or below to open the source in a
+              popup. Click on the evidence searches to jump straight to the
+              relevant section for quick verification.
             </p>
             <div className="space-y-3">
               {visibleSources.map((group, idx) => {
@@ -2682,29 +2728,48 @@ function ChatTurn({
                     {group.hits.length > 0 && (
                       <div className="mt-2">
                         <div className="text-[10px] uppercase tracking-wide text-neutral-500 mb-1">
-                          Evidence jumps
+                          Relevant Chunks
                         </div>
                         <div className="flex flex-wrap gap-1">
-                          {group.hits.map((hit, evidenceIdx) => {
-                            if (!hit) return null;
-                            const preview = formatEvidenceSnippet(hit.text || "", 220);
-                            return (
-                              <button
-                                key={`${groupKey}-${evidenceIdx}`}
-                                type="button"
-                                className="rounded-full border border-indigo-400/30 bg-neutral-900/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-100 transition hover:bg-indigo-500/30"
-                                data-evidence={
-                                  preview
-                                    ? `Evidence snippet: ${preview}`
-                                    : undefined
-                                }
-                                onClick={() => onOpenCitation(hit)}
-                                aria-label={`Open evidence ${evidenceIdx + 1} for ${label}`}
-                              >
-                                Search {evidenceIdx + 1}
-                              </button>
-                            );
-                          })}
+                          {group.hits
+                            .filter(
+                              (hit, idx) =>
+                                idx ===
+                                group.hits.findIndex((h) => h.text === hit.text)
+                            )
+                            .map((hit, evidenceIdx) => {
+                              if (
+                                group.hits
+                                  .slice(0, evidenceIdx)
+                                  .find((t) => t.text === hit.text)
+                              ) {
+                                // skip duplicates in this group
+                                return null;
+                              }
+                              if (!hit) return null;
+                              const preview = formatEvidenceSnippet(
+                                hit.text || "",
+                                220
+                              );
+                              return (
+                                <button
+                                  key={`${groupKey}-${evidenceIdx}`}
+                                  type="button"
+                                  className="rounded-full border border-indigo-400/30 bg-neutral-900/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-100 transition hover:bg-indigo-500/30"
+                                  data-evidence={
+                                    preview
+                                      ? `Evidence snippet: ${preview}`
+                                      : undefined
+                                  }
+                                  onClick={() => onOpenCitation(hit)}
+                                  aria-label={`Open evidence ${
+                                    evidenceIdx + 1
+                                  } for ${label}`}
+                                >
+                                  Evidence {evidenceIdx + 1}
+                                </button>
+                              );
+                            })}
                         </div>
                       </div>
                     )}
