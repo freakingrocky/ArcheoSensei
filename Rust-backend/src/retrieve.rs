@@ -56,6 +56,51 @@ async fn knn_lecture(
     Ok(rows.into_iter().map(row_to_hit).collect())
 }
 
+async fn knn_store_priority(
+    pool: &DbPool,
+    qvec: &Vector,
+    store_kind: i32,
+    limit: i64,
+) -> anyhow::Result<Vec<RetrieveHit>> {
+    let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
+               FROM chunks c \
+               LEFT JOIN documents d ON d.id = c.doc_id \
+               WHERE c.store_kind = $2 AND COALESCE((d.extra->>'priority')::int, 0) = 1 \
+               ORDER BY c.embedding <=> $1::vector \
+               LIMIT $3";
+    let rows: Vec<PgRow> = sqlx::query(sql)
+        .bind(qvec.clone())
+        .bind(store_kind)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(row_to_hit).collect())
+}
+
+async fn knn_lecture_priority(
+    pool: &DbPool,
+    qvec: &Vector,
+    lecture_key: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<RetrieveHit>> {
+    let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
+               FROM chunks c \
+               LEFT JOIN documents d ON d.id = c.doc_id \
+               WHERE c.store_kind = 2 AND c.metadata->>'lecture_key' = $2 \
+                 AND COALESCE((d.extra->>'priority')::int, 0) = 1 \
+               ORDER BY c.embedding <=> $1::vector \
+               LIMIT $3";
+    let rows: Vec<PgRow> = sqlx::query(sql)
+        .bind(qvec.clone())
+        .bind(lecture_key)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(row_to_hit).collect())
+}
+
 fn row_to_hit(row: PgRow) -> RetrieveHit {
     RetrieveHit {
         id: row.get::<Uuid, _>("id"),
@@ -304,6 +349,22 @@ pub async fn retrieve(
 
 pub fn build_context(hits: &[RetrieveHit]) -> String {
     build_context_from_hits(hits)
+}
+
+pub async fn retrieve_priority_hits(
+    pool: &DbPool,
+    embedder: &Embedder,
+    query: &str,
+    lecture_key: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<RetrieveHit>> {
+    let embeddings = embedder.embed([query]).await?;
+    let qvec = Vector::from(embeddings.into_iter().next().context("missing embedding")?);
+    if let Some(key) = lecture_key {
+        knn_lecture_priority(pool, &qvec, key, limit).await
+    } else {
+        knn_store_priority(pool, &qvec, 2, limit).await
+    }
 }
 
 #[cfg(test)]

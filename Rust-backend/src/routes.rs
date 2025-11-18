@@ -420,7 +420,13 @@ pub async fn quiz_question(
     State(state): State<AppState>,
     Json(payload): Json<QuizQuestionRequest>,
 ) -> Result<Json<QuizQuestionResponse>, ApiError> {
-    if payload.topic.is_none() && payload.lecture_key.is_none() {
+    let has_lecture_selection = payload.lecture_key.is_some()
+        || payload
+            .lecture_keys
+            .as_ref()
+            .map(|keys| keys.iter().any(|k| !k.trim().is_empty()))
+            .unwrap_or(false);
+    if payload.topic.is_none() && !has_lecture_selection {
         return Err(ApiError(anyhow::anyhow!("Provide a topic or lecture key")));
     }
     let mut question_type = payload
@@ -431,30 +437,48 @@ pub async fn quiz_question(
     if !allowed.contains(&question_type.as_str()) {
         question_type = "short_answer".to_string();
     }
+    let mut lecture_cycle: Vec<String> = payload
+        .lecture_keys
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|k| !k.trim().is_empty())
+        .collect();
+    if lecture_cycle.is_empty() {
+        if let Some(single) = payload.lecture_key.clone() {
+            if !single.trim().is_empty() {
+                lecture_cycle.push(single);
+            }
+        }
+    }
+    let wants_all = lecture_cycle
+        .iter()
+        .any(|key| key.eq_ignore_ascii_case("all"));
+    let lecture_for_question = if wants_all || lecture_cycle.is_empty() {
+        None
+    } else {
+        let index = payload.question_index.unwrap_or(0);
+        let idx = index % lecture_cycle.len();
+        lecture_cycle.get(idx).cloned()
+    };
     let query = payload
         .topic
         .clone()
         .or_else(|| {
-            payload
-                .lecture_key
+            lecture_for_question
                 .clone()
+                .or(payload.lecture_key.clone())
                 .map(|k| format!("Key ideas from {}", k))
         })
         .unwrap_or_else(|| "Key ideas from the course".to_string());
-    let retrieval = retrieve::retrieve(
+    let priority_hits = retrieve::retrieve_priority_hits(
         &state.pool,
         &state.embedder,
         &query,
-        payload.lecture_key.as_deref(),
-        payload.lecture_key.is_none(),
-        None,
+        lecture_for_question.as_deref(),
+        20,
     )
     .await?;
-    let priority_hits: Vec<_> = retrieval
-        .hits
-        .into_iter()
-        .filter(|hit| hit.priority == Some(1))
-        .collect();
     if priority_hits.is_empty() {
         return Err(ApiError(anyhow::anyhow!(
             "No priority 1 documents available for quizzes"
@@ -466,7 +490,7 @@ pub async fn quiz_question(
     Ok(Json(QuizQuestionResponse {
         question,
         context,
-        lecture_key: payload.lecture_key.clone(),
+        lecture_key: lecture_for_question,
         topic: payload.topic.clone(),
     }))
 }
