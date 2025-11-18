@@ -12,6 +12,15 @@ type Hit = {
   citation?: string | null;
   file_url?: string | null;
 };
+type LectureImageAsset = {
+  id: number;
+  img_url: string;
+  title: string;
+  description?: string | null;
+  notes?: string | null;
+  lecture_key?: string | null;
+  area_description?: any;
+};
 type Msg = { role: "user" | "assistant" | "system"; content: string };
 
 const LOADING_LINES = [
@@ -42,6 +51,7 @@ export default function Chat() {
   const [diag, setDiag] = useState<any>({});
   const [lectures, setLectures] = useState<LectureItem[]>([]);
   const [selectedLecture, setSelectedLecture] = useState<string>("");
+  const [lectureImages, setLectureImages] = useState<LectureImageAsset[]>([]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -73,6 +83,7 @@ export default function Chat() {
     setMessages((m) => [...m, { role: "user", content: query }]);
     setQ("");
     setLoading(true);
+    setLectureImages([]);
 
     try {
       const opts: any = { use_global: true };
@@ -83,6 +94,7 @@ export default function Chat() {
       setMessages((m) => [...m, { role: "assistant", content: answer }]);
       setHits(data.hits || []);
       setDiag(data.diagnostics || {});
+      setLectureImages(data.lecture_images || []);
     } catch (e: any) {
       setMessages((m) => [
         ...m,
@@ -93,6 +105,7 @@ export default function Chat() {
       ]);
       setHits([]);
       setDiag({});
+      setLectureImages([]);
     } finally {
       setLoading(false);
     }
@@ -195,6 +208,91 @@ export default function Chat() {
                           </div>
                         </div>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {lectureImages.length > 0 && (
+                  <div className="mt-6 border border-neutral-800 rounded-2xl p-3 bg-neutral-900/60">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-neutral-300 mb-2">
+                      Visual references
+                      <span className="text-[10px] text-neutral-500 font-normal">
+                        pulled directly from annotated lecture assets
+                      </span>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {lectureImages.map((img) => {
+                        const highlights = Array.isArray(img.area_description)
+                          ? img.area_description.slice(0, 3)
+                          : [];
+                        return (
+                          <div
+                            key={`${img.id}-${img.img_url}`}
+                            className="border border-neutral-800 rounded-xl overflow-hidden bg-neutral-950/60"
+                          >
+                            <div className="relative aspect-video bg-neutral-900">
+                              <img
+                                src={img.img_url}
+                                alt={img.title}
+                                loading="lazy"
+                                className="h-full w-full object-cover"
+                              />
+                              <a
+                                href={img.img_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="absolute bottom-2 right-2 text-[10px] bg-neutral-900/80 text-neutral-200 px-2 py-0.5 rounded-full border border-neutral-800"
+                              >
+                                open
+                              </a>
+                            </div>
+                            <div className="p-3 space-y-2">
+                              <div>
+                                <div className="text-sm font-semibold text-neutral-100">
+                                  {img.title}
+                                </div>
+                                {img.lecture_key && (
+                                  <div className="text-[11px] text-neutral-400">
+                                    {img.lecture_key}
+                                  </div>
+                                )}
+                              </div>
+                              {img.description && (
+                                <div className="text-[11px] text-neutral-400 whitespace-pre-line">
+                                  {img.description}
+                                </div>
+                              )}
+                              {img.notes && (
+                                <div className="text-[11px] text-neutral-300 bg-neutral-900/80 border border-neutral-800 rounded-lg p-2">
+                                  {img.notes}
+                                </div>
+                              )}
+                              {highlights.length > 0 && (
+                                <div>
+                                  <div className="text-[10px] uppercase tracking-wide text-neutral-500 mb-1">
+                                    Highlights
+                                  </div>
+                                  <ul className="space-y-1 text-[11px] text-neutral-400">
+                                    {highlights.map((area: any, idx: number) => (
+                                      <li key={idx} className="flex gap-2">
+                                        <span className="text-neutral-500">•</span>
+                                        <span>
+                                          <span className="font-medium text-neutral-300">
+                                            {area?.label || `Region ${idx + 1}`}
+                                          </span>
+                                          {area?.help_text && (
+                                            <span className="text-neutral-500"> — {area.help_text}</span>
+                                          )}
+                                        </span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
