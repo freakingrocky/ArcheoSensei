@@ -133,7 +133,10 @@ pub async fn query(
         user_id: None,
     });
     let RetrieveResult {
-        diagnostics, hits, ..
+        diagnostics,
+        hits,
+        images,
+        ..
     } = retrieve::retrieve(
         &state.pool,
         &state.embedder,
@@ -143,7 +146,7 @@ pub async fn query(
         options.user_id.as_deref(),
     )
     .await?;
-    let context = retrieve::build_context(&hits);
+    let context = retrieve::build_context(&hits, &images);
     let FactCheckOutput {
         answer,
         fact_check,
@@ -166,6 +169,7 @@ pub async fn query(
         llm_usage: llm.usage.clone(),
         answer,
         fact_check,
+        lecture_images: images,
     };
     Ok(Json(response))
 }
@@ -217,7 +221,8 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             return Ok(());
         }
     };
-    let context = retrieve::build_context(&retrieval.hits);
+    let lecture_images = retrieval.images.clone();
+    let context = retrieve::build_context(&retrieval.hits, &lecture_images);
     state.jobs.update_job(
         &job_id,
         json!({
@@ -226,6 +231,7 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             "hits": serde_json::to_value(&retrieval.hits).unwrap_or(json!([])),
             "top_k": retrieval.hits.len(),
             "context_len": context.len(),
+            "lecture_images": serde_json::to_value(&lecture_images).unwrap_or(json!([])),
         }),
     );
     let jobs_for_progress = state.jobs.clone();
@@ -331,6 +337,7 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
                     "answer": answer,
                     "fact_check": serde_json::to_value(fact_check).unwrap_or(json!({})),
                     "llm": serde_json::to_value(llm).unwrap_or(json!({})),
+                    "lecture_images": serde_json::to_value(&lecture_images).unwrap_or(json!([])),
                 }),
             );
         }
@@ -484,7 +491,7 @@ pub async fn quiz_question(
             "No priority 1 documents available for quizzes"
         )));
     }
-    let context = retrieve::build_context(&priority_hits);
+    let context = retrieve::build_context(&priority_hits, &[]);
     let question =
         llm::generate_quiz_item(&state.settings, &context, &query, &question_type).await?;
     Ok(Json(QuizQuestionResponse {

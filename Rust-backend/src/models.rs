@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
+use sqlx::FromRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -32,6 +33,22 @@ pub struct RetrieveDiagnostics {
     pub lecture_forced: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, FromRow)]
+#[serde(default)]
+pub struct LectureImageAsset {
+    pub id: i64,
+    pub img_url: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lecture_key: Option<String>,
+    #[serde(default)]
+    pub area_description: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RetrieveHit {
@@ -52,6 +69,8 @@ pub struct RetrieveResult {
     pub diagnostics: RetrieveDiagnostics,
     pub hits: Vec<RetrieveHit>,
     pub label: Option<String>,
+    #[serde(default)]
+    pub images: Vec<LectureImageAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -220,6 +239,8 @@ pub struct QueryResponse {
     pub llm_usage: LlmUsage,
     pub answer: Option<String>,
     pub fact_check: FactCheckResult,
+    #[serde(default)]
+    pub lecture_images: Vec<LectureImageAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
