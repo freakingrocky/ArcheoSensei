@@ -39,6 +39,8 @@ pub struct RetrieveHit {
     pub text: String,
     pub metadata: serde_json::Value,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     pub citation: Option<String>,
     pub file_url: Option<String>,
     pub tag: Option<String>,
@@ -234,6 +236,8 @@ pub struct QuizQuestion {
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuizQuestionRequest {
     pub lecture_key: Option<String>,
+    pub lecture_keys: Option<Vec<String>>,
+    pub question_index: Option<usize>,
     pub topic: Option<String>,
     pub question_type: Option<String>,
 }
