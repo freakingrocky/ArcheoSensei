@@ -105,10 +105,18 @@ impl JobManager {
                             }
                         }
                         "fact_ai_status" => {
-                            entry.fact_ai_status = v.as_str().map(|s| s.to_string())
+                            if v.is_null() {
+                                entry.fact_ai_status = None;
+                            } else {
+                                entry.fact_ai_status = v.as_str().map(|s| s.to_string());
+                            }
                         }
                         "fact_claims_status" => {
-                            entry.fact_claims_status = v.as_str().map(|s| s.to_string())
+                            if v.is_null() {
+                                entry.fact_claims_status = None;
+                            } else {
+                                entry.fact_claims_status = v.as_str().map(|s| s.to_string());
+                            }
                         }
                         other => {
                             entry.extra.insert(other.to_string(), v);

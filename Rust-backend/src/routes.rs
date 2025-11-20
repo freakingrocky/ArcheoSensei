@@ -253,42 +253,75 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
                 );
             }
             "attempt_start" => {
+                let attempt = event
+                    .data
+                    .get("attempt")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let directives = event
+                    .data
+                    .get("directives")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 jobs_for_progress.update_job(
                     &job_id_for_progress,
                     json!({
                         "phase": "llm",
+                        "current_attempt": attempt,
+                        "directives": directives,
                         "fact_ai_status": Value::Null,
                         "fact_claims_status": Value::Null,
                     }),
                 );
             }
+            "llm_result" => {
+                if let Some(llm) = event.data.get("llm") {
+                    jobs_for_progress.update_job(&job_id_for_progress, json!({"llm": llm.clone()}));
+                }
+            }
             "fact_ai" => {
-                let passed = event
-                    .data
-                    .get("ai_check")
+                let ai_check = event.data.get("ai_check").cloned();
+                let passed = ai_check
+                    .as_ref()
                     .and_then(|v| v.get("passed"))
                     .and_then(Value::as_bool);
-                let payload = if let Some(passed) = passed {
-                    let status = if passed { "passed" } else { "failed" };
-                    json!({ "phase": "fact_ai", "fact_ai_status": status })
-                } else {
-                    json!({ "phase": "fact_ai" })
-                };
-                jobs_for_progress.update_job(&job_id_for_progress, payload);
+                let mut payload = serde_json::Map::new();
+                payload.insert("phase".to_string(), Value::String("fact_ai".to_string()));
+                if let Some(check) = ai_check {
+                    payload.insert("last_ai_check".to_string(), check.clone());
+                    if let Some(passed) = passed {
+                        let status = if passed { "passed" } else { "failed" };
+                        payload.insert(
+                            "fact_ai_status".to_string(),
+                            Value::String(status.to_string()),
+                        );
+                    }
+                }
+                jobs_for_progress.update_job(&job_id_for_progress, Value::Object(payload));
             }
             "fact_claims" => {
-                let passed = event
-                    .data
-                    .get("claims_check")
+                let claims_check = event.data.get("claims_check").cloned();
+                let passed = claims_check
+                    .as_ref()
                     .and_then(|v| v.get("passed"))
                     .and_then(Value::as_bool);
-                let payload = if let Some(passed) = passed {
-                    let status = if passed { "passed" } else { "failed" };
-                    json!({ "phase": "fact_claims", "fact_claims_status": status })
-                } else {
-                    json!({ "phase": "fact_claims" })
-                };
-                jobs_for_progress.update_job(&job_id_for_progress, payload);
+                let mut payload = serde_json::Map::new();
+                payload.insert(
+                    "phase".to_string(),
+                    Value::String("fact_claims".to_string()),
+                );
+                if let Some(check) = claims_check {
+                    payload.insert("last_claim_check".to_string(), check.clone());
+                    if let Some(passed) = passed {
+                        let status = if passed { "passed" } else { "failed" };
+                        payload.insert(
+                            "fact_claims_status".to_string(),
+                            Value::String(status.to_string()),
+                        );
+                    }
+                }
+                jobs_for_progress.update_job(&job_id_for_progress, Value::Object(payload));
             }
             "attempt_complete" => {
                 if let Some(attempts) = event.data.get("attempts").cloned() {
@@ -297,14 +330,64 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
                         .get("retry_count")
                         .and_then(Value::as_u64)
                         .unwrap_or_default() as usize;
+                    let needs_retry = event
+                        .data
+                        .get("needs_retry")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let message = if needs_retry {
+                        "AI response could not be validated, retrying..."
+                    } else {
+                        ""
+                    };
                     jobs_for_progress.update_job(
                         &job_id_for_progress,
                         json!({
                             "attempts": attempts,
                             "retry_count": retry_count,
+                            "message": message,
                         }),
                     );
                 }
+            }
+            "completed" => {
+                let status = event
+                    .data
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let fact_payload = event
+                    .data
+                    .get("fact_check")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let answer = event.data.get("answer").cloned().unwrap_or(Value::Null);
+                let llm = event.data.get("llm").cloned().unwrap_or(Value::Null);
+                let final_status = if status == "passed" {
+                    "succeeded"
+                } else {
+                    "failed"
+                };
+                let message = if final_status == "failed" {
+                    fact_payload
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("AI response could not be validated after retries.")
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                jobs_for_progress.update_job(
+                    &job_id_for_progress,
+                    json!({
+                        "status": final_status,
+                        "phase": "done",
+                        "answer": answer,
+                        "fact_check": fact_payload,
+                        "llm": llm,
+                        "message": message,
+                    }),
+                );
             }
             _ => {}
         });
@@ -323,14 +406,30 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             fact_check,
             llm,
         }) => {
+            let fact_check_value = serde_json::to_value(&fact_check).unwrap_or_else(|_| json!({}));
+            let llm_value = serde_json::to_value(&llm).unwrap_or_else(|_| json!({}));
+            let answer_value = serde_json::to_value(&answer).unwrap_or(Value::Null);
+            let final_status = if fact_check.status == "passed" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            let message = if final_status == "failed" {
+                fact_check.message.clone().unwrap_or_else(|| {
+                    "AI response could not be validated after retries.".to_string()
+                })
+            } else {
+                String::new()
+            };
             state.jobs.update_job(
                 &job_id,
                 json!({
-                    "status": "succeeded",
+                    "status": final_status,
                     "phase": "done",
-                    "answer": answer,
-                    "fact_check": serde_json::to_value(fact_check).unwrap_or(json!({})),
-                    "llm": serde_json::to_value(llm).unwrap_or(json!({})),
+                    "answer": answer_value,
+                    "fact_check": fact_check_value,
+                    "llm": llm_value,
+                    "message": message,
                 }),
             );
         }
