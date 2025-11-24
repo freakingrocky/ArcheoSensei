@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::{
     db::DbPool,
     embedder::Embedder,
-    models::{RetrieveDiagnostics, RetrieveHit, RetrieveResult},
+    models::{LectureImageAsset, RetrieveDiagnostics, RetrieveHit, RetrieveResult},
 };
+use tracing::warn;
 
 async fn knn_store(
     pool: &DbPool,
@@ -234,6 +235,24 @@ fn build_context_from_hits(hits: &[RetrieveHit]) -> String {
     blocks.join("\n\n")
 }
 
+async fn fetch_lecture_images(
+    pool: &DbPool,
+    lecture_key: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<LectureImageAsset>> {
+    let sql = "SELECT id, img_url, title, description, notes, lecture_key, area_description \
+               FROM lecture_image_assets \
+               WHERE lecture_key = $1 \
+               ORDER BY updated_at DESC \
+               LIMIT $2";
+    let rows = sqlx::query_as::<_, LectureImageAsset>(sql)
+        .bind(lecture_key)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
 pub async fn retrieve(
     pool: &DbPool,
     embedder: &Embedder,
@@ -248,8 +267,10 @@ pub async fn retrieve(
     let mut diagnostics = RetrieveDiagnostics::default();
     let mut merged: Vec<RetrieveHit> = Vec::new();
 
+    let mut lecture_for_images: Option<String> = None;
     let lecture_hits = if let Some(force) = lecture_force {
         diagnostics.lecture_forced = Some(force.to_string());
+        lecture_for_images = Some(force.to_string());
         knn_lecture(pool, &qvec, force, 20).await?
     } else {
         let coarse = knn_store(pool, &qvec, 2, 60).await?;
@@ -257,6 +278,7 @@ pub async fn retrieve(
         if let Some((key, votes)) = det {
             diagnostics.lecture_detected = Some(key.clone());
             diagnostics.lecture_votes = votes;
+            lecture_for_images = Some(key.clone());
             knn_lecture(pool, &qvec, &key, 20).await?
         } else {
             Vec::new()
@@ -334,21 +356,112 @@ pub async fn retrieve(
         hits.truncate(12);
     }
 
+    if lecture_for_images.is_none() {
+        lecture_for_images = hits
+            .iter()
+            .find_map(|hit| hit.metadata.get("lecture_key").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+    }
+
     let label = hits.first().and_then(|hit| {
         hit.citation
             .clone()
             .or_else(|| readable_label(&hit.metadata))
     });
 
+    let images = if let Some(key) = lecture_for_images.clone() {
+        match fetch_lecture_images(pool, &key, 4).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                warn!("lecture image fetch failed for {}: {:?}", key, err);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     Ok(RetrieveResult {
         diagnostics,
         hits,
         label,
+        images,
     })
 }
 
-pub fn build_context(hits: &[RetrieveHit]) -> String {
-    build_context_from_hits(hits)
+fn clean_text(value: &Option<String>) -> Option<String> {
+    value
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn build_image_context(images: &[LectureImageAsset]) -> String {
+    if images.is_empty() {
+        return String::new();
+    }
+    let mut blocks = Vec::new();
+    blocks.push("LECTURE_IMAGES:".to_string());
+    for (idx, image) in images.iter().enumerate() {
+        let mut lines = Vec::new();
+        lines.push(format!("[IMG {}] {}", idx + 1, image.title.trim()));
+        if let Some(lecture) = image
+            .lecture_key
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            lines.push(format!("Lecture: {}", lecture));
+        }
+        lines.push(format!("URL: {}", image.img_url.trim()));
+        if let Some(desc) = clean_text(&image.description) {
+            lines.push(format!("Description: {}", desc));
+        }
+        if let Some(notes) = clean_text(&image.notes) {
+            lines.push(format!("Notes: {}", notes));
+        }
+        if let Some(areas) = image.area_description.as_array() {
+            let mut area_lines = Vec::new();
+            for area in areas.iter().take(3) {
+                let label = area
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Highlight");
+                let help_text = area.get("help_text").and_then(|v| v.as_str()).unwrap_or("");
+                let x = area.get("x").and_then(|v| v.as_f64());
+                let y = area.get("y").and_then(|v| v.as_f64());
+                let w = area.get("w").and_then(|v| v.as_f64());
+                let h = area.get("h").and_then(|v| v.as_f64());
+                let mut highlight = format!("- {}", label);
+                if let (Some(x), Some(y), Some(w), Some(h)) = (x, y, w, h) {
+                    highlight.push_str(&format!(" @ ({:.2}, {:.2}) size {:.2}x{:.2}", x, y, w, h));
+                }
+                if !help_text.trim().is_empty() {
+                    highlight.push_str(&format!(": {}", help_text.trim()));
+                }
+                area_lines.push(highlight);
+            }
+            if !area_lines.is_empty() {
+                lines.push("Highlights:".to_string());
+                lines.extend(area_lines);
+            }
+        }
+        blocks.push(lines.join("\n"));
+    }
+    blocks.join("\n\n")
+}
+
+pub fn build_context(hits: &[RetrieveHit], images: &[LectureImageAsset]) -> String {
+    let mut context = build_context_from_hits(hits);
+    let image_block = build_image_context(images);
+    if !image_block.is_empty() {
+        if !context.trim().is_empty() {
+            context.push_str("\n\n");
+        }
+        context.push_str(&image_block);
+    }
+    context
 }
 
 pub async fn retrieve_priority_hits(
@@ -391,7 +504,7 @@ mod tests {
             file_url: None,
             tag: None,
         };
-        let context = build_context(&[hit]);
+        let context = build_context(&[hit], &[]);
         assert!(context.contains("example text"));
     }
 }

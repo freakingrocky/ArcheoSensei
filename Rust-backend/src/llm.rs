@@ -339,6 +339,9 @@ async fn answer_with_context(
     system.push_str(
         "Coordinates are normalized 0-1. Always pair each annotated-image block with surrounding prose that explains why the image matters and references the original slide citation."
     );
+    system.push_str(
+        "\nIf the CONTEXT contains a LECTURE_IMAGES section, interpret it as curated scene descriptions. Reference an image when it materially strengthens the answer (timelines, visual identification, stylistic comparisons). Do not invent imagery and skip images when they add no value."
+    );
     if let Some(extra) = directives.and_then(value_if_not_blank) {
         system.push_str(" Follow these directives carefully: ");
         system.push_str(&extra);
