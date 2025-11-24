@@ -126,7 +126,7 @@ export function AuthGate({ children }: AuthGateProps) {
       const phoneValue = `+${normalizedDigits}`;
       const { error: authError } = await supabase.auth.signInWithOtp({
         phone: phoneValue,
-        options: { channel: "sms" },
+        options: { channel: "sms", captchaToken },
       });
       if (authError) {
         setError(authError.message);
@@ -136,7 +136,7 @@ export function AuthGate({ children }: AuthGateProps) {
     } else {
       const { error: authError } = await supabase.auth.signInWithOtp({
         email: trimmed,
-        options: { emailRedirectTo: window.location.href },
+        options: { emailRedirectTo: window.location.href, captchaToken },
       });
       if (authError) {
         setError(authError.message);
@@ -152,7 +152,7 @@ export function AuthGate({ children }: AuthGateProps) {
     if (!captchaOk) return;
     const { error: authError } = await supabase.auth.signInWithOAuth({
       provider,
-      options: { redirectTo: window.location.href },
+      options: { redirectTo: window.location.href, captchaToken },
     });
     if (authError) {
       setError(authError.message);
