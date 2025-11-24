@@ -253,7 +253,11 @@ function normalizeHighlight(
   const labelSource =
     raw?.label || raw?.title || raw?.name || raw?.id || raw?.segment;
   const helpSource =
-    raw?.help_text || raw?.notes || raw?.description || raw?.detail || raw?.tooltip;
+    raw?.help_text ||
+    raw?.notes ||
+    raw?.description ||
+    raw?.detail ||
+    raw?.tooltip;
   return {
     label:
       typeof labelSource === "string" && labelSource.trim()
@@ -349,7 +353,9 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
         {(data.lecture || data.description) && (
           <div className="text-sm text-neutral-300">
             {data.lecture && <span>{data.lecture}</span>}
-            {data.lecture && data.description && <span className="mx-1">•</span>}
+            {data.lecture && data.description && (
+              <span className="mx-1">•</span>
+            )}
             {data.description && <span>{data.description}</span>}
           </div>
         )}
@@ -366,7 +372,8 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
           const top = region.y * 100;
           const width = region.w * 100;
           const height = region.h * 100;
-          const color = region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length];
+          const color =
+            region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length];
           const fillColor = withAlpha(color);
           return (
             <button
@@ -386,7 +393,9 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
                 setActiveIdx((prev) => (prev === idx ? null : prev))
               }
               onFocus={() => setActiveIdx(idx)}
-              onBlur={() => setActiveIdx((prev) => (prev === idx ? null : prev))}
+              onBlur={() =>
+                setActiveIdx((prev) => (prev === idx ? null : prev))
+              }
               onClick={() => setActiveIdx(idx)}
             >
               <span className="sr-only">
@@ -408,7 +417,8 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
               className="rounded-xl border bg-black/80 px-3 py-2 text-xs text-white shadow-xl"
               style={{
                 borderColor:
-                  activeRegion.color || HIGHLIGHT_COLORS[activeIdx! % HIGHLIGHT_COLORS.length],
+                  activeRegion.color ||
+                  HIGHLIGHT_COLORS[activeIdx! % HIGHLIGHT_COLORS.length],
               }}
             >
               <div className="font-semibold">
@@ -424,9 +434,7 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
         )}
       </div>
       <div className="space-y-3 border-t border-indigo-500/20 px-4 py-3 text-sm text-neutral-200">
-        {data.notes && (
-          <p className="text-neutral-300">{data.notes}</p>
-        )}
+        {data.notes && <p className="text-neutral-300">{data.notes}</p>}
         {highlights.length > 0 && (
           <div>
             <div className="text-[11px] uppercase tracking-wide text-neutral-400">
@@ -439,7 +447,8 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
                     className="mt-1 h-2.5 w-2.5 rounded-full"
                     style={{
                       backgroundColor:
-                        region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length],
+                        region.color ||
+                        HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length],
                     }}
                   />
                   <div>
@@ -1282,7 +1291,7 @@ export default function ChatPage() {
 
   // UI / query state
   const [lectures, setLectures] = useState<LectureItem[]>([]);
-  const [selectedLecture, setSelectedLecture] = useState<string>("");
+  // const [selectedLecture, setSelectedLecture] = useState<string>("");
   const [diag, setDiag] = useState<any>({});
   const [q, setQ] = useState("");
 
@@ -1362,7 +1371,7 @@ export default function ChatPage() {
       ? 92
       : 100;
 
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const endOfMessagesRef = useRef<HTMLDivElement>(null);
 
   // load chats on mount
   useEffect(() => {
@@ -1391,9 +1400,11 @@ export default function ChatPage() {
   }, []);
 
   // autoscroll
+  const messageCount = activeChat?.messages?.length ?? 0;
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: 1e9, behavior: "smooth" });
-  }, [activeChat?.messages]);
+    if (!messageCount) return;
+    endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messageCount]);
 
   // HUD cycling
   useEffect(() => {
@@ -1449,7 +1460,7 @@ export default function ChatPage() {
       return;
     }
     const query = q.trim();
-    if (!query || phase !== "idle") return;
+    if (!query || (phase !== "idle" && phase !== "done")) return;
 
     setChats((prev) =>
       appendMessage(prev, activeChat.id, { role: "user", content: query })
@@ -1465,9 +1476,7 @@ export default function ChatPage() {
     setValidationModal(null);
     let jobStarted = false;
     try {
-      const opts: any = { use_global: true };
-      if (selectedLecture) opts.force_lecture_key = selectedLecture;
-      const { job_id } = await startQueryJob(query, opts);
+      const { job_id } = await startQueryJob(query, { use_global: true });
       jobChatRef.current = activeChat.id;
       setJobId(job_id);
       jobStarted = true;
@@ -1500,7 +1509,7 @@ export default function ChatPage() {
     setQuizOpen(true);
     setQuizStage("config");
     setQuizConfig({
-      lecture_key: selectedLecture || "",
+      lecture_key: "",
       topic: "",
     });
     setQuizActiveConfig(null);
@@ -1949,7 +1958,6 @@ export default function ChatPage() {
         {/* Chat thread */}
         <div className="mx-auto max-w-3xl px-4">
           <div
-            ref={scrollRef}
             className="pt-6 pb-40 overflow-auto"
             style={{ minHeight: "calc(100dvh - 160px)" }}
           >
@@ -1962,13 +1970,12 @@ export default function ChatPage() {
                 ))}
               </div>
             )}
+            <div ref={endOfMessagesRef} />
           </div>
         </div>
 
         {/* Bottom composer */}
         <Composer
-          selectedLecture={selectedLecture}
-          setSelectedLecture={setSelectedLecture}
           lectures={lectures}
           q={q}
           setQ={setQ}
@@ -2643,25 +2650,19 @@ function EmptyState() {
     <div className="mt-16 text-center text-neutral-400">
       <div className="text-2xl font-semibold mb-2">Ask your course</div>
       <div className="text-sm">
-        Name your chat in the sidebar → “New Chat”. It will auto-detect the
-        lecture unless you restrict it.
+        Name your chat in the sidebar → “New Chat”. ArcheoSensei will
+        automatically pull from every lecture it needs.
       </div>
     </div>
   );
 }
 
 function Composer({
-  selectedLecture,
-  setSelectedLecture,
-  lectures,
   q,
   setQ,
   disabled,
   onSubmit,
 }: {
-  selectedLecture: string;
-  setSelectedLecture: (v: string) => void;
-  lectures: LectureItem[];
   q: string;
   setQ: (v: string) => void;
   disabled: boolean;
@@ -2669,21 +2670,8 @@ function Composer({
 }) {
   return (
     <div className="fixed inset-x-0 bottom-0 z-20 border-t border-neutral-900 bg-neutral-950/80 backdrop-blur-md">
-      <div className="mx-auto max-w-3xl px-4 py-3">
+      <div className="mx-auto max-w-3xl px-4 py-3 space-y-1">
         <div className="flex gap-2">
-          <select
-            className="w-44 shrink-0 rounded-xl border border-neutral-800 bg-neutral-900 text-neutral-200 px-3 py-2 text-sm"
-            value={selectedLecture}
-            onChange={(e) => setSelectedLecture(e.target.value)}
-          >
-            <option value="">All lectures</option>
-            {lectures.map((l) => (
-              <option key={l.lecture_key} value={l.lecture_key}>
-                {l.lecture_key} ({l.count})
-              </option>
-            ))}
-          </select>
-
           <input
             className="flex-1 rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-3
                        placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-700"
@@ -2703,10 +2691,8 @@ function Composer({
             Ask
           </button>
         </div>
-        <div className="text-[11px] text-neutral-500 mt-1">
-          {selectedLecture
-            ? `Restricted to ${selectedLecture}`
-            : "Auto-detecting lecture"}
+        <div className="text-[11px] text-neutral-500">
+          We’ll auto-detect the relevant lectures for every question.
         </div>
       </div>
     </div>

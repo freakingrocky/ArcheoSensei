@@ -652,7 +652,7 @@ async fn claim_check<E: SentenceEmbedder>(
             coverage * 100.0,
             COVERAGE_MIN * 100.0,
             score * 100.0,
-            threshold * 100.0
+            threshold
         ))
     };
 
