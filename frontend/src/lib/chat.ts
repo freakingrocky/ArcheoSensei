@@ -78,8 +78,12 @@ export type ChatRow = {
 
 export function createChat(name: string): Chat {
   const now = Date.now();
+  const id =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `chat_${now}_${Math.random().toString(36).slice(2)}`;
   return {
-    id: `chat_${now}_${Math.random().toString(36).slice(2)}`,
+    id,
     name,
     createdAt: now,
     updatedAt: now,
