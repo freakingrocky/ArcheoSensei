@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AuthGate } from "@/components/AuthGate";
 import { askRAG, fetchLectures, LectureItem } from "@/lib/api";
+import type { User } from "@supabase/supabase-js";
+import type { UserProfile } from "@/lib/profile";
 
 type Hit = {
   id: string | number;
@@ -33,7 +36,15 @@ function formatCitationLabel(raw?: string | null) {
   return withoutFileToken.replace(/\s{2,}/g, " ").trim();
 }
 
-export default function Chat() {
+function ChatScreen({
+  user,
+  profile,
+  signOut,
+}: {
+  user: User;
+  profile: UserProfile;
+  signOut: () => Promise<void>;
+}) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
@@ -42,6 +53,7 @@ export default function Chat() {
   const [diag, setDiag] = useState<any>({});
   const [lectures, setLectures] = useState<LectureItem[]>([]);
   const [selectedLecture, setSelectedLecture] = useState<string>("");
+  const userLabel = profile.display_name || user.email || "You";
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -113,17 +125,26 @@ export default function Chat() {
           <div className="mx-auto max-w-3xl px-4 py-3 flex items-center gap-3">
             <div className="h-6 w-6 rounded bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
             <div className="font-semibold">ArcheoSensei</div>
-            <div className="ml-auto text-xs text-neutral-400">
-              {detectedLecture ? (
-                <span>
-                  Detected lecture:{" "}
-                  <span className="px-2 py-0.5 rounded bg-neutral-800 text-indigo-300 font-mono">
-                    {detectedLecture}
+            <div className="ml-auto flex flex-wrap items-center gap-4 text-xs text-neutral-400">
+              <span className="hidden sm:inline">Signed in as {userLabel}</span>
+              <button
+                onClick={signOut}
+                className="rounded-lg border border-neutral-800 px-3 py-1 text-[11px] text-neutral-200 hover:bg-neutral-900"
+              >
+                Sign out
+              </button>
+              <div>
+                {detectedLecture ? (
+                  <span>
+                    Detected lecture:{" "}
+                    <span className="px-2 py-0.5 rounded bg-neutral-800 text-indigo-300 font-mono">
+                      {detectedLecture}
+                    </span>
                   </span>
-                </span>
-              ) : (
-                <span>Auto-detecting lecture…</span>
-              )}
+                ) : (
+                  <span>Auto-detecting lecture…</span>
+                )}
+              </div>
             </div>
           </div>
         </header>
@@ -266,5 +287,15 @@ export default function Chat() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <AuthGate>
+      {({ user, profile, signOut }) => (
+        <ChatScreen user={user} profile={profile} signOut={signOut} />
+      )}
+    </AuthGate>
   );
 }
