@@ -3,8 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 const TURNSTILE_VERIFY_URL =
   "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
-const secretKey =
-  process.env.TURNSTILE_SECRET_KEY || "0x4AAAAAACCqHxKJDINsnaA0TEIgZb4jTNM";
+const secretKey = process.env.NEXT_PUBLIC_TURNSTILE_SECRET_KEY;
 
 export async function POST(req: NextRequest) {
   try {

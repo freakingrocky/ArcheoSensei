@@ -29,10 +29,7 @@ export function AuthGate({ children }: AuthGateProps) {
   const [captchaInstance, setCaptchaInstance] = useState(0);
   const [verifyingCaptcha, setVerifyingCaptcha] = useState(false);
 
-  const turnstileSiteKey =
-    process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ||
-    "0x4AAAAAACCqH-0B16C0VLn8";
-
+  const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
   useEffect(() => {
     let mounted = true;
     supabase.auth
@@ -144,7 +141,11 @@ export function AuthGate({ children }: AuthGateProps) {
   const ready = useMemo(() => Boolean(user && profile), [user, profile]);
 
   if (ready) {
-    return <>{children({ user: user!, profile: profile!, signOut: handleSignOut })}</>;
+    return (
+      <>
+        {children({ user: user!, profile: profile!, signOut: handleSignOut })}
+      </>
+    );
   }
 
   return (
