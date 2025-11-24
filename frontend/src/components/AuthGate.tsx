@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { ensureUserProfile, type UserProfile } from "@/lib/profile";
+import Image from "next/image";
+import Turnstile from "react-turnstile";
 
 type AuthGateProps = {
   children: (ctx: {
@@ -22,7 +24,13 @@ export function AuthGate({ children }: AuthGateProps) {
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaError, setCaptchaError] = useState<string | null>(null);
+  const [captchaInstance, setCaptchaInstance] = useState(0);
+  const [verifyingCaptcha, setVerifyingCaptcha] = useState(false);
+  const [captchaVerified, setCaptchaVerified] = useState(false);
 
+  const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
   useEffect(() => {
     let mounted = true;
     supabase.auth
@@ -61,11 +69,51 @@ export function AuthGate({ children }: AuthGateProps) {
       });
   }, [user]);
 
+  const verifyTurnstile = async (token = captchaToken) => {
+    if (!token) {
+      setCaptchaError("Please complete the verification.");
+      return false;
+    }
+
+    setVerifyingCaptcha(true);
+    setCaptchaError(null);
+    try {
+      const res = await fetch("/api/turnstile/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      if (!data?.success) {
+        setCaptchaError("Verification failed. Please try again.");
+        setCaptchaToken(null);
+        setCaptchaInstance((n) => n + 1);
+        setCaptchaVerified(false);
+        return false;
+      }
+      setCaptchaVerified(true);
+      return true;
+    } catch (err) {
+      console.error("turnstile verify error", err);
+      setCaptchaError("Could not verify the challenge. Please retry.");
+      setCaptchaToken(null);
+      setCaptchaInstance((n) => n + 1);
+      setCaptchaVerified(false);
+      return false;
+    } finally {
+      setVerifyingCaptcha(false);
+    }
+  };
+
   const handleSignInWithEmail = async () => {
     setMessage(null);
     setError(null);
     const trimmed = email.trim();
     if (!trimmed) return;
+    if (!captchaVerified) {
+      const captchaOk = await verifyTurnstile();
+      if (!captchaOk) return;
+    }
     const { error: authError } = await supabase.auth.signInWithOtp({
       email: trimmed,
       options: { emailRedirectTo: window.location.href },
@@ -79,6 +127,8 @@ export function AuthGate({ children }: AuthGateProps) {
 
   const handleProviderLogin = async (provider: "github" | "google") => {
     setError(null);
+    const captchaOk = await verifyTurnstile();
+    if (!captchaOk) return;
     const { error: authError } = await supabase.auth.signInWithOAuth({
       provider,
       options: { redirectTo: window.location.href },
@@ -97,7 +147,11 @@ export function AuthGate({ children }: AuthGateProps) {
   const ready = useMemo(() => Boolean(user && profile), [user, profile]);
 
   if (ready) {
-    return <>{children({ user: user!, profile: profile!, signOut: handleSignOut })}</>;
+    return (
+      <>
+        {children({ user: user!, profile: profile!, signOut: handleSignOut })}
+      </>
+    );
   }
 
   return (
@@ -114,30 +168,83 @@ export function AuthGate({ children }: AuthGateProps) {
             placeholder="you@example.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            disabled={state === "loading"}
+            disabled={state === "loading" || verifyingCaptcha}
           />
           <button
             onClick={handleSignInWithEmail}
             className="rounded-lg bg-white px-3 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-50"
-            disabled={state === "loading"}
+            disabled={state === "loading" || verifyingCaptcha}
           >
             Send link
           </button>
         </div>
 
+        <div className="mt-4">
+          <label className="block text-xs text-neutral-400">Verification</label>
+          <div className="mt-2 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
+            {captchaVerified ? (
+              <div className="flex items-center gap-2 text-sm text-emerald-300">
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500/20 text-xs font-semibold text-emerald-200">
+                  ✓
+                </div>
+                User verified
+              </div>
+            ) : (
+              <Turnstile
+                key={captchaInstance}
+                sitekey={turnstileSiteKey}
+                onSuccess={(token) => {
+                  setCaptchaToken(token);
+                  setCaptchaError(null);
+                  verifyTurnstile(token);
+                }}
+                onError={() => {
+                  setCaptchaToken(null);
+                  setCaptchaVerified(false);
+                  setCaptchaError("Verification failed. Please retry.");
+                }}
+                onExpire={() => {
+                  setCaptchaToken(null);
+                  setCaptchaVerified(false);
+                  setCaptchaError("Verification expired. Please retry.");
+                  setCaptchaInstance((n) => n + 1);
+                }}
+                options={{ theme: "dark" }}
+              />
+            )}
+            {captchaError && (
+              <div className="mt-2 text-xs text-rose-300">{captchaError}</div>
+            )}
+          </div>
+        </div>
+
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button
             onClick={() => handleProviderLogin("github")}
-            className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
-            disabled={state === "loading"}
+            className="flex items-center justify-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
+            disabled={state === "loading" || verifyingCaptcha}
           >
+            <Image
+              src="/github.svg"
+              alt="GitHub"
+              width={18}
+              height={18}
+              className="h-4 w-4"
+            />
             Continue with GitHub
           </button>
           <button
             onClick={() => handleProviderLogin("google")}
-            className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
-            disabled={state === "loading"}
+            className="flex items-center justify-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
+            disabled={state === "loading" || verifyingCaptcha}
           >
+            <Image
+              src="/google.svg"
+              alt="Google"
+              width={18}
+              height={18}
+              className="h-4 w-4"
+            />
             Continue with Google
           </button>
         </div>

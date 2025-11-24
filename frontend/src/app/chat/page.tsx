@@ -12,8 +12,6 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
 import {
-  fetchLectures,
-  LectureItem,
   startQueryJob,
   fetchQueryJob,
   requestQuizQuestion,
@@ -52,8 +50,8 @@ type Phase =
 type QuizStage = "config" | "question";
 
 type QuizConfig = {
-  lecture_key: string;
   topic: string;
+  lecture_key?: string | null;
 };
 
 type QuizAttempt = {
@@ -1312,8 +1310,6 @@ function ChatExperience({
   const [namerValue, setNamerValue] = useState("");
 
   // UI / query state
-  const [lectures, setLectures] = useState<LectureItem[]>([]);
-  // const [selectedLecture, setSelectedLecture] = useState<string>("");
   const [diag, setDiag] = useState<any>({});
   const [q, setQ] = useState("");
 
@@ -1349,7 +1345,7 @@ function ChatExperience({
   const [quizOpen, setQuizOpen] = useState(false);
   const [quizStage, setQuizStage] = useState<QuizStage>("config");
   const [quizConfig, setQuizConfig] = useState<QuizConfig>({
-    lecture_key: "",
+    lecture_key: null,
     topic: "",
   });
   const [quizActiveConfig, setQuizActiveConfig] = useState<QuizConfig | null>(
@@ -1464,13 +1460,6 @@ function ChatExperience({
       console.error("Failed to persist active chat", err)
     );
   }, [activeId, user.id]);
-
-  // fetch lectures on mount
-  useEffect(() => {
-    fetchLectures()
-      .then(setLectures)
-      .catch(() => setLectures([]));
-  }, []);
 
   // autoscroll
   const messageCount = activeChat?.messages?.length ?? 0;
@@ -1588,8 +1577,8 @@ function ChatExperience({
     setQuizOpen(true);
     setQuizStage("config");
     setQuizConfig({
-      lecture_key: "",
       topic: "",
+      lecture_key: null,
     });
     setQuizActiveConfig(null);
     setQuizQuestion(null);
@@ -1614,7 +1603,7 @@ function ChatExperience({
     }
     setQuizOpen(false);
     setQuizStage("config");
-    setQuizConfig({ lecture_key: "", topic: "" });
+    setQuizConfig({ lecture_key: null, topic: "" });
     setQuizActiveConfig(null);
     setQuizQuestion(null);
     setQuizContext("");
@@ -1636,14 +1625,10 @@ function ChatExperience({
     setQuizHintVisible(false);
     setQuizAnswer("");
     try {
-      const normalized: QuizConfig = {
-        lecture_key: (config.lecture_key || "").trim(),
-        topic: (config.topic || "").trim(),
-      };
+      const normalizedTopic = (config.topic || "").trim();
       const type = nextQuizType();
       const res = await requestQuizQuestion({
-        lecture_key: normalized.lecture_key || undefined,
-        topic: normalized.topic || undefined,
+        topic: normalizedTopic || undefined,
         question_type: type,
       });
       setQuizQuestion(res.question);
@@ -1652,8 +1637,8 @@ function ChatExperience({
       setQuizAnswer(res.question.question_type === "mcq_multi" ? [] : "");
       setQuizStage("question");
       setQuizActiveConfig({
-        lecture_key: res.lecture_key || normalized.lecture_key,
-        topic: res.topic || normalized.topic,
+        lecture_key: res.lecture_key || null,
+        topic: res.topic || normalizedTopic,
       });
     } catch (err: any) {
       setQuizError(err?.message ?? "Unable to generate quiz question");
@@ -1958,10 +1943,15 @@ function ChatExperience({
       {/* Sidebar */}
       <aside className="w-64 border-r border-neutral-900 bg-neutral-950/80 backdrop-blur-sm p-3 hidden md:flex md:flex-col">
         <div className="mb-4 text-xs text-neutral-400">
-          <div className="text-sm font-semibold text-neutral-200 truncate">
-            {profile.display_name || user.email}
+          <div className="flex items-center gap-3">
+            <InitialAvatar email={user.email} name={profile.display_name} />
+            <div>
+              <div className="text-sm font-semibold text-neutral-200 truncate">
+                {profile.display_name || user.email}
+              </div>
+              <div className="text-[11px] text-neutral-500 truncate">{user.email}</div>
+            </div>
           </div>
-          <div className="text-[11px] text-neutral-500 truncate">{user.email}</div>
           <button
             onClick={signOut}
             className="mt-2 rounded-lg border border-neutral-800 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-900"
@@ -2039,7 +2029,12 @@ function ChatExperience({
             <div className="font-semibold truncate">
               {activeChat?.name || "ArcheoSensei"}
             </div>
-            <div className="ml-auto text-xs text-neutral-400">
+            <div className="ml-auto flex items-center gap-3 text-xs text-neutral-400">
+              <InitialAvatar
+                email={user.email}
+                name={profile.display_name}
+                className="hidden sm:flex"
+              />
               {detectedLecture ? (
                 <>
                   Detected lecture:{" "}
@@ -2081,7 +2076,6 @@ function ChatExperience({
 
         {/* Bottom composer */}
         <Composer
-          lectures={lectures}
           q={q}
           setQ={setQ}
           disabled={phase !== "idle" && phase !== "done"}
@@ -2098,8 +2092,8 @@ function ChatExperience({
                   Quiz Me
                 </h2>
                 <p className="text-sm text-neutral-400">
-                  Choose a lecture or enter a topic to generate a quick practice
-                  question.
+                  Enter a topic to generate a quick practice question. We’ll
+                  pull material from the most relevant lectures automatically.
                 </p>
               </div>
               <button
@@ -2114,31 +2108,7 @@ function ChatExperience({
               <div className="mt-6 space-y-5">
                 <div>
                   <label className="block text-sm font-medium text-neutral-300">
-                    Choose a lecture
-                  </label>
-                  <select
-                    className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-600"
-                    value={quizConfig.lecture_key}
-                    onChange={(e) =>
-                      setQuizConfig((prev) => ({
-                        ...prev,
-                        lecture_key: e.target.value,
-                      }))
-                    }
-                    onFocus={() => setQuizError("")}
-                  >
-                    <option value="">All lectures</option>
-                    {lectures.map((l) => (
-                      <option key={l.lecture_key} value={l.lecture_key}>
-                        {l.lecture_key} ({l.count})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-neutral-300">
-                    Or type any topic
+                    Topic
                   </label>
                   <input
                     value={quizConfig.topic}
@@ -2169,10 +2139,7 @@ function ChatExperience({
                   </button>
                   <button
                     onClick={() => generateQuiz(quizConfig)}
-                    disabled={
-                      (!quizConfig.lecture_key && !quizConfig.topic.trim()) ||
-                      quizQuestionLoading
-                    }
+                    disabled={!quizConfig.topic.trim() || quizQuestionLoading}
                     className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {quizQuestionLoading ? "Generating…" : "Quiz Me"}
@@ -2768,6 +2735,27 @@ function EmptyState() {
         Name your chat in the sidebar → “New Chat”. ArcheoSensei will
         automatically pull from every lecture it needs.
       </div>
+    </div>
+  );
+}
+
+function InitialAvatar({
+  email,
+  name,
+  className = "",
+}: {
+  email?: string | null;
+  name?: string | null;
+  className?: string;
+}) {
+  const labelSource = (name || email || "").trim();
+  const letter = labelSource ? labelSource[0] : "?";
+
+  return (
+    <div
+      className={`flex h-8 w-8 items-center justify-center rounded-full bg-neutral-800 text-sm font-semibold uppercase text-neutral-100 ${className}`}
+    >
+      {letter}
     </div>
   );
 }
