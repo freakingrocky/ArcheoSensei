@@ -28,6 +28,7 @@ export function AuthGate({ children }: AuthGateProps) {
   const [captchaError, setCaptchaError] = useState<string | null>(null);
   const [captchaInstance, setCaptchaInstance] = useState(0);
   const [verifyingCaptcha, setVerifyingCaptcha] = useState(false);
+  const [captchaVerified, setCaptchaVerified] = useState(false);
 
   const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
   useEffect(() => {
@@ -68,8 +69,8 @@ export function AuthGate({ children }: AuthGateProps) {
       });
   }, [user]);
 
-  const verifyTurnstile = async () => {
-    if (!captchaToken) {
+  const verifyTurnstile = async (token = captchaToken) => {
+    if (!token) {
       setCaptchaError("Please complete the verification.");
       return false;
     }
@@ -80,21 +81,24 @@ export function AuthGate({ children }: AuthGateProps) {
       const res = await fetch("/api/turnstile/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: captchaToken }),
+        body: JSON.stringify({ token }),
       });
       const data = await res.json();
       if (!data?.success) {
         setCaptchaError("Verification failed. Please try again.");
         setCaptchaToken(null);
         setCaptchaInstance((n) => n + 1);
+        setCaptchaVerified(false);
         return false;
       }
+      setCaptchaVerified(true);
       return true;
     } catch (err) {
       console.error("turnstile verify error", err);
       setCaptchaError("Could not verify the challenge. Please retry.");
       setCaptchaToken(null);
       setCaptchaInstance((n) => n + 1);
+      setCaptchaVerified(false);
       return false;
     } finally {
       setVerifyingCaptcha(false);
@@ -106,8 +110,10 @@ export function AuthGate({ children }: AuthGateProps) {
     setError(null);
     const trimmed = email.trim();
     if (!trimmed) return;
-    const captchaOk = await verifyTurnstile();
-    if (!captchaOk) return;
+    if (!captchaVerified) {
+      const captchaOk = await verifyTurnstile();
+      if (!captchaOk) return;
+    }
     const { error: authError } = await supabase.auth.signInWithOtp({
       email: trimmed,
       options: { emailRedirectTo: window.location.href },
@@ -176,24 +182,36 @@ export function AuthGate({ children }: AuthGateProps) {
         <div className="mt-4">
           <label className="block text-xs text-neutral-400">Verification</label>
           <div className="mt-2 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
-            <Turnstile
-              key={captchaInstance}
-              sitekey={turnstileSiteKey}
-              onSuccess={(token) => {
-                setCaptchaToken(token);
-                setCaptchaError(null);
-              }}
-              onError={() => {
-                setCaptchaToken(null);
-                setCaptchaError("Verification failed. Please retry.");
-              }}
-              onExpire={() => {
-                setCaptchaToken(null);
-                setCaptchaError("Verification expired. Please retry.");
-                setCaptchaInstance((n) => n + 1);
-              }}
-              options={{ theme: "dark" }}
-            />
+            {captchaVerified ? (
+              <div className="flex items-center gap-2 text-sm text-emerald-300">
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500/20 text-xs font-semibold text-emerald-200">
+                  ✓
+                </div>
+                User verified
+              </div>
+            ) : (
+              <Turnstile
+                key={captchaInstance}
+                sitekey={turnstileSiteKey}
+                onSuccess={(token) => {
+                  setCaptchaToken(token);
+                  setCaptchaError(null);
+                  verifyTurnstile(token);
+                }}
+                onError={() => {
+                  setCaptchaToken(null);
+                  setCaptchaVerified(false);
+                  setCaptchaError("Verification failed. Please retry.");
+                }}
+                onExpire={() => {
+                  setCaptchaToken(null);
+                  setCaptchaVerified(false);
+                  setCaptchaError("Verification expired. Please retry.");
+                  setCaptchaInstance((n) => n + 1);
+                }}
+                options={{ theme: "dark" }}
+              />
+            )}
             {captchaError && (
               <div className="mt-2 text-xs text-rose-300">{captchaError}</div>
             )}
