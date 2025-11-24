@@ -30,6 +30,22 @@ export function AuthGate({ children }: AuthGateProps) {
   const [verifyingCaptcha, setVerifyingCaptcha] = useState(false);
   const [captchaVerified, setCaptchaVerified] = useState(false);
 
+  const phoneCountries = useMemo(
+    () => [
+      { code: "US", dial: "+1", label: "United States" },
+      { code: "CA", dial: "+1", label: "Canada" },
+      { code: "GB", dial: "+44", label: "United Kingdom" },
+      { code: "AU", dial: "+61", label: "Australia" },
+      { code: "NZ", dial: "+64", label: "New Zealand" },
+      { code: "IN", dial: "+91", label: "India" },
+      { code: "DE", dial: "+49", label: "Germany" },
+      { code: "FR", dial: "+33", label: "France" },
+      { code: "NL", dial: "+31", label: "Netherlands" },
+    ],
+    []
+  );
+  const [countryCode, setCountryCode] = useState(0);
+
   const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
   useEffect(() => {
     let mounted = true;
@@ -114,11 +130,18 @@ export function AuthGate({ children }: AuthGateProps) {
       const captchaOk = await verifyTurnstile();
       if (!captchaOk) return;
     }
-    const normalizedPhone = trimmed.replace(/[^\d+]/g, "");
+    const normalizedPhone = trimmed.replace(/\D/g, "");
 
     if (signInMode === "phone") {
+      if (!normalizedPhone) {
+        setError("Please enter your phone number.");
+        return;
+      }
+      const selected = phoneCountries[countryCode];
+      const phoneValue = `${selected.dial}${normalizedPhone}`;
       const { error: authError } = await supabase.auth.signInWithOtp({
-        phone: normalizedPhone,
+        phone: phoneValue,
+        options: { channel: "sms" },
       });
       if (authError) {
         setError(authError.message);
@@ -182,9 +205,23 @@ export function AuthGate({ children }: AuthGateProps) {
         </p>
         <label className="text-xs text-neutral-400">Email or phone</label>
         <div className="mt-1 flex gap-2">
+          {signInMode === "phone" && (
+            <select
+              className="w-36 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-neutral-700"
+              value={countryCode}
+              onChange={(e) => setCountryCode(Number(e.target.value))}
+              disabled={state === "loading" || verifyingCaptcha}
+            >
+              {phoneCountries.map((country, idx) => (
+                <option key={country.code} value={idx}>
+                  {country.label} ({country.dial})
+                </option>
+              ))}
+            </select>
+          )}
           <input
             className="flex-1 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-neutral-700"
-            placeholder={signInMode === "phone" ? "+1 555 123 4567" : "you@example.com"}
+            placeholder={signInMode === "phone" ? "555 123 4567" : "you@example.com"}
             value={contact}
             onChange={(e) => setContact(e.target.value)}
             type={signInMode === "phone" ? "tel" : "email"}
@@ -197,7 +234,7 @@ export function AuthGate({ children }: AuthGateProps) {
             className="rounded-lg bg-white px-3 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-50"
             disabled={state === "loading" || verifyingCaptcha}
           >
-            Send link
+            {signInMode === "phone" ? "Send code" : "Send link"}
           </button>
         </div>
 
