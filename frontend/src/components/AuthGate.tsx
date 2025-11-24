@@ -5,7 +5,7 @@ import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { ensureUserProfile, type UserProfile } from "@/lib/profile";
 import Image from "next/image";
-import { Turnstile } from "react-turnstile";
+import Turnstile from "react-turnstile";
 
 type AuthGateProps = {
   children: (ctx: {
