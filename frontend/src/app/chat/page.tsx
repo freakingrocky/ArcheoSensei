@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
@@ -20,15 +27,17 @@ import {
   Msg,
   Hit,
   FactCheckResult,
-  loadChats,
-  saveChats,
-  loadActiveChatId,
-  saveActiveChatId,
   createChat,
   appendMessage,
   renameChat,
   deleteChat,
+  fetchUserChats,
+  upsertUserChat,
+  deleteUserChat,
 } from "@/lib/chat";
+import { AuthGate } from "@/components/AuthGate";
+import { updateActiveChatId, type UserProfile } from "@/lib/profile";
+import type { User } from "@supabase/supabase-js";
 
 // ------- constants / helpers -------
 type Phase =
@@ -1267,10 +1276,23 @@ function LectureRef({
 
 // -----------------------------------
 
-export default function ChatPage() {
-  // sidebar state: chats in localStorage
+function ChatExperience({
+  user,
+  profile,
+  signOut,
+}: {
+  user: User;
+  profile: UserProfile;
+  signOut: () => Promise<void>;
+}) {
+  // sidebar state: chats stored in Supabase
   const [chats, setChats] = useState<Chat[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(
+    profile.active_chat_id
+  );
+  const [chatsLoading, setChatsLoading] = useState(true);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const hydratedRef = useRef(false);
   const activeChat = useMemo<Chat | null>(
     () => chats.find((c) => c.id === activeId) || null,
     [chats, activeId]
@@ -1364,24 +1386,75 @@ export default function ChatPage() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // load chats on mount
-  useEffect(() => {
-    const cs = loadChats();
-    let id = loadActiveChatId();
-    if (!cs.length) {
-      setNamerOpen(true); // first run → ask for a name
-    }
-    setChats(cs);
-    if (id && cs.some((c) => c.id === id)) setActiveId(id);
-  }, []);
+  const persistChats = useCallback(
+    (nextChats: Chat[], ids: string[]) => {
+      ids.forEach((id) => {
+        const chat = nextChats.find((c) => c.id === id);
+        if (chat) {
+          void upsertUserChat(user.id, chat).catch((err) =>
+            console.error("Failed to save chat", err)
+          );
+        }
+      });
+    },
+    [user.id]
+  );
 
-  // persist chats & active id
+  const applyChatUpdate = useCallback(
+    (updater: (prev: Chat[]) => Chat[], ids?: string[]) => {
+      setChats((prev) => {
+        const next = updater(prev);
+        if (ids?.length) persistChats(next, ids);
+        return next;
+      });
+    },
+    [persistChats]
+  );
+
+  // load chats on mount from Supabase
   useEffect(() => {
-    saveChats(chats);
-  }, [chats]);
+    let cancelled = false;
+    setSyncError(null);
+    setChatsLoading(true);
+
+    fetchUserChats(user.id)
+      .then((cs) => {
+        if (cancelled) return;
+        setChats(cs);
+        const nextActive =
+          (profile.active_chat_id &&
+            cs.some((c) => c.id === profile.active_chat_id)
+            ? profile.active_chat_id
+            : cs[0]?.id) || null;
+        setActiveId(nextActive);
+        if (!cs.length) setNamerOpen(true);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to load chats", err);
+        setSyncError("Could not load chats from Supabase.");
+        setChats([]);
+        setActiveId(null);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          hydratedRef.current = true;
+          setChatsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user.id, profile.active_chat_id]);
+
+  // persist active chat selection
   useEffect(() => {
-    if (activeId) saveActiveChatId(activeId);
-  }, [activeId]);
+    if (!hydratedRef.current) return;
+    void updateActiveChatId(user.id, activeId).catch((err) =>
+      console.error("Failed to persist active chat", err)
+    );
+  }, [activeId, user.id]);
 
   // fetch lectures on mount
   useEffect(() => {
@@ -1414,8 +1487,7 @@ export default function ChatPage() {
     const name = namerValue.trim();
     if (!name) return;
     const c = createChat(name);
-    const next = [c, ...chats];
-    setChats(next);
+    applyChatUpdate((prev) => [c, ...prev], [c.id]);
     setActiveId(c.id);
     setNamerOpen(false);
   }
@@ -1432,17 +1504,21 @@ export default function ChatPage() {
       chats.find((c) => c.id === id)?.name || ""
     );
     if (!name) return;
-    setChats((prev) => renameChat(prev, id, name));
+    applyChatUpdate((prev) => renameChat(prev, id, name), [id]);
   }
   function doDeleteChat(id: string) {
     if (!confirm("Delete this chat?")) return;
     const next = deleteChat(chats, id);
     setChats(next);
+    void deleteUserChat(user.id, id).catch((err) =>
+      console.error("Failed to delete chat", err)
+    );
     if (activeId === id) setActiveId(next[0]?.id || null);
   }
 
   // submit question
   const submit = async () => {
+    if (chatsLoading) return;
     if (!activeChat) {
       // force name prompt if no active chat exists
       actionNewChat();
@@ -1451,8 +1527,9 @@ export default function ChatPage() {
     const query = q.trim();
     if (!query || phase !== "idle") return;
 
-    setChats((prev) =>
-      appendMessage(prev, activeChat.id, { role: "user", content: query })
+    applyChatUpdate(
+      (prev) => appendMessage(prev, activeChat.id, { role: "user", content: query }),
+      [activeChat.id]
     );
     setQ("");
     setPhase("sent");
@@ -1473,11 +1550,13 @@ export default function ChatPage() {
       jobStarted = true;
     } catch (e: any) {
       setStatusLine("Encountered an error while generating answer.");
-      setChats((prev) =>
-        appendMessage(prev, activeChat.id, {
-          role: "assistant",
-          content: `Error: ${e?.message ?? "unknown error"}`,
-        })
+      applyChatUpdate(
+        (prev) =>
+          appendMessage(prev, activeChat.id, {
+            role: "assistant",
+            content: `Error: ${e?.message ?? "unknown error"}`,
+          }),
+        [activeChat.id]
       );
     } finally {
       if (!jobStarted) {
@@ -1723,14 +1802,16 @@ export default function ChatPage() {
 
           const targetChatId = jobChatRef.current || activeChat?.id;
           if (targetChatId) {
-            setChats((prev) =>
-              appendMessage(prev, targetChatId, {
-                role: "assistant",
-                content: status.answer || "(no answer)",
-                hits: limitedHits,
-                diagnostics: status.diagnostics || {},
-                fact_check: fact,
-              })
+            applyChatUpdate(
+              (prev) =>
+                appendMessage(prev, targetChatId, {
+                  role: "assistant",
+                  content: status.answer || "(no answer)",
+                  hits: limitedHits,
+                  diagnostics: status.diagnostics || {},
+                  fact_check: fact,
+                }),
+              [targetChatId]
             );
           }
           setDiag(status.diagnostics || {});
@@ -1867,6 +1948,18 @@ export default function ChatPage() {
     <div className="min-h-[100dvh] bg-neutral-950 text-neutral-100 relative flex">
       {/* Sidebar */}
       <aside className="w-64 border-r border-neutral-900 bg-neutral-950/80 backdrop-blur-sm p-3 hidden md:flex md:flex-col">
+        <div className="mb-4 text-xs text-neutral-400">
+          <div className="text-sm font-semibold text-neutral-200 truncate">
+            {profile.display_name || user.email}
+          </div>
+          <div className="text-[11px] text-neutral-500 truncate">{user.email}</div>
+          <button
+            onClick={signOut}
+            className="mt-2 rounded-lg border border-neutral-800 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-900"
+          >
+            Sign out
+          </button>
+        </div>
         <button
           onClick={actionNewChat}
           className="w-full mb-3 rounded-lg bg-white text-black font-semibold py-2 hover:opacity-90"
@@ -1881,6 +1974,12 @@ export default function ChatPage() {
         </button>
         <div className="text-xs text-neutral-400 mb-2">Chats</div>
         <div className="flex-1 overflow-auto space-y-1">
+          {chatsLoading && (
+            <div className="text-neutral-600 text-xs">Loading chats…</div>
+          )}
+          {syncError && (
+            <div className="text-rose-300 text-xs">{syncError}</div>
+          )}
           {chats.map((c) => (
             <div
               key={c.id}
@@ -1916,7 +2015,7 @@ export default function ChatPage() {
               </div>
             </div>
           ))}
-          {!chats.length && (
+          {!chats.length && !chatsLoading && (
             <div className="text-neutral-600 text-xs">No chats yet.</div>
           )}
         </div>
@@ -1954,7 +2053,13 @@ export default function ChatPage() {
             style={{ minHeight: "calc(100dvh - 160px)" }}
           >
             {!messages.length ? (
-              <EmptyState />
+              chatsLoading ? (
+                <div className="text-center text-sm text-neutral-500 pt-10">
+                  Loading your chats…
+                </div>
+              ) : (
+                <EmptyState />
+              )
             ) : (
               <div className="space-y-5">
                 {messages.map((m, i) => (
@@ -2561,6 +2666,16 @@ export default function ChatPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <AuthGate>
+      {({ user, profile, signOut }) => (
+        <ChatExperience user={user} profile={profile} signOut={signOut} />
+      )}
+    </AuthGate>
   );
 }
 
