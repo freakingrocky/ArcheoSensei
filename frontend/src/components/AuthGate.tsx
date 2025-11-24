@@ -306,8 +306,7 @@ export function AuthGate({ children }: AuthGateProps) {
                 onExpire={() => {
                   setCaptchaToken(null);
                   setCaptchaVerified(false);
-                  setCaptchaError("Verification expired. Please retry.");
-                  setCaptchaInstance((n) => n + 1);
+                  setCaptchaError("Verification expired. Please retry when you're ready.");
                 }}
                 options={{ theme: "dark", refreshExpired: "manual" }}
               />
