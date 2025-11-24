@@ -6,6 +6,7 @@ import { supabase } from "@/lib/supabase";
 import { ensureUserProfile, type UserProfile } from "@/lib/profile";
 import Image from "next/image";
 import Turnstile from "react-turnstile";
+import PhoneInput from "react-phone-input-2";
 
 type AuthGateProps = {
   children: (ctx: {
@@ -21,7 +22,7 @@ export function AuthGate({ children }: AuthGateProps) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [state, setState] = useState<SignInViewState>("loading");
-  const [email, setEmail] = useState("");
+  const [contact, setContact] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
@@ -29,6 +30,7 @@ export function AuthGate({ children }: AuthGateProps) {
   const [captchaInstance, setCaptchaInstance] = useState(0);
   const [verifyingCaptcha, setVerifyingCaptcha] = useState(false);
   const [captchaVerified, setCaptchaVerified] = useState(false);
+  const [phoneCountry, setPhoneCountry] = useState("us");
 
   const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
   useEffect(() => {
@@ -105,23 +107,42 @@ export function AuthGate({ children }: AuthGateProps) {
     }
   };
 
-  const handleSignInWithEmail = async () => {
+  const handleSignIn = async () => {
     setMessage(null);
     setError(null);
-    const trimmed = email.trim();
+    const trimmed = contact.trim();
     if (!trimmed) return;
     if (!captchaVerified) {
       const captchaOk = await verifyTurnstile();
       if (!captchaOk) return;
     }
-    const { error: authError } = await supabase.auth.signInWithOtp({
-      email: trimmed,
-      options: { emailRedirectTo: window.location.href },
-    });
-    if (authError) {
-      setError(authError.message);
+    const normalizedDigits = trimmed.replace(/\D/g, "");
+
+    if (signInMode === "phone") {
+      if (!normalizedDigits) {
+        setError("Please enter your phone number.");
+        return;
+      }
+      const phoneValue = `+${normalizedDigits}`;
+      const { error: authError } = await supabase.auth.signInWithOtp({
+        phone: phoneValue,
+        options: { channel: "sms" },
+      });
+      if (authError) {
+        setError(authError.message);
+      } else {
+        setMessage("Check your phone for a login code.");
+      }
     } else {
-      setMessage("Check your email for a login link.");
+      const { error: authError } = await supabase.auth.signInWithOtp({
+        email: trimmed,
+        options: { emailRedirectTo: window.location.href },
+      });
+      if (authError) {
+        setError(authError.message);
+      } else {
+        setMessage("Check your email for a login link.");
+      }
     }
   };
 
@@ -144,6 +165,12 @@ export function AuthGate({ children }: AuthGateProps) {
     setProfile(null);
   };
 
+  const signInMode = useMemo<"email" | "phone">(() => {
+    if (/[a-zA-Z]/.test(contact)) return "email";
+    if (/\d/.test(contact)) return "phone";
+    return "email";
+  }, [contact]);
+
   const ready = useMemo(() => Boolean(user && profile), [user, profile]);
 
   if (ready) {
@@ -159,23 +186,60 @@ export function AuthGate({ children }: AuthGateProps) {
       <div className="w-full max-w-md rounded-2xl border border-neutral-800 bg-neutral-900/70 p-6 shadow-xl">
         <div className="mb-3 text-lg font-semibold">Sign in to continue</div>
         <p className="text-sm text-neutral-400 mb-4">
-          Use email, GitHub, or Google to access your profile and saved chats.
+          Use email, phone, GitHub, or Google to access your profile and saved chats.
         </p>
-        <label className="text-xs text-neutral-400">Email</label>
+        <label className="text-xs text-neutral-400">Email or phone</label>
         <div className="mt-1 flex gap-2">
-          <input
-            className="flex-1 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-neutral-700"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            disabled={state === "loading" || verifyingCaptcha}
-          />
+          {signInMode === "phone" ? (
+            <PhoneInput
+              country={phoneCountry}
+              value={contact}
+              onChange={(value, data) => {
+                const nextValue = value ? (value.startsWith("+") ? value : `+${value}`) : "";
+                setContact(nextValue);
+                if (
+                  data &&
+                  typeof data === "object" &&
+                  "countryCode" in data &&
+                  typeof data.countryCode === "string"
+                ) {
+                  setPhoneCountry(data.countryCode);
+                }
+              }}
+              enableSearch
+              disableSearchIcon
+              countryCodeEditable={false}
+              containerClass="phone-input-container flex-1"
+              inputClass="phone-input-input"
+              buttonClass="phone-input-flag"
+              dropdownClass="phone-input-dropdown"
+              placeholder="Enter phone number"
+              disabled={state === "loading" || verifyingCaptcha}
+              inputProps={{
+                name: "phone",
+                required: true,
+                autoComplete: "tel",
+                inputMode: "tel",
+              }}
+            />
+          ) : (
+            <input
+              className="flex-1 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-neutral-700"
+              placeholder="you@example.com"
+              value={contact}
+              onChange={(e) => setContact(e.target.value)}
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              disabled={state === "loading" || verifyingCaptcha}
+            />
+          )}
           <button
-            onClick={handleSignInWithEmail}
+            onClick={handleSignIn}
             className="rounded-lg bg-white px-3 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-50"
             disabled={state === "loading" || verifyingCaptcha}
           >
-            Send link
+            {signInMode === "phone" ? "Send code" : "Send link"}
           </button>
         </div>
 

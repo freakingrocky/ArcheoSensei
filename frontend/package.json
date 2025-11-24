@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "next lint"
@@ -14,6 +14,7 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-markdown": "^10.1.0",
+    "react-phone-input-2": "^2.15.1",
     "react-turnstile": "^1.1.4",
     "remark-gfm": "^4.0.1",
     "unist-util-visit": "^5.0.0"
