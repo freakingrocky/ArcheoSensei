@@ -30,6 +30,7 @@ export function AuthGate({ children }: AuthGateProps) {
   const [captchaInstance, setCaptchaInstance] = useState(0);
   const [verifyingCaptcha, setVerifyingCaptcha] = useState(false);
   const [captchaVerified, setCaptchaVerified] = useState(false);
+  const [authInProgress, setAuthInProgress] = useState(false);
   const [phoneCountry, setPhoneCountry] = useState("us");
 
   const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
@@ -72,6 +73,8 @@ export function AuthGate({ children }: AuthGateProps) {
   }, [user]);
 
   const verifyTurnstile = async (token = captchaToken) => {
+    if (captchaVerified) return true;
+    if (verifyingCaptcha) return false;
     if (!token) {
       setCaptchaError("Please complete the verification.");
       return false;
@@ -111,51 +114,78 @@ export function AuthGate({ children }: AuthGateProps) {
     setMessage(null);
     setError(null);
     const trimmed = contact.trim();
-    if (!trimmed) return;
-    if (!captchaVerified) {
-      const captchaOk = await verifyTurnstile();
-      if (!captchaOk) return;
-    }
-    const normalizedDigits = trimmed.replace(/\D/g, "");
+    if (!trimmed || authInProgress) return;
+    setAuthInProgress(true);
+    const statusText =
+      signInMode === "phone"
+        ? "Sending a code..."
+        : "Check your email for a login link.";
+    setMessage(statusText);
+    try {
+      if (!captchaVerified) {
+        const captchaOk = await verifyTurnstile();
+        if (!captchaOk) {
+          setMessage(null);
+          return;
+        }
+      }
+      const normalizedDigits = trimmed.replace(/\D/g, "");
 
-    if (signInMode === "phone") {
-      if (!normalizedDigits) {
-        setError("Please enter your phone number.");
-        return;
-      }
-      const phoneValue = `+${normalizedDigits}`;
-      const { error: authError } = await supabase.auth.signInWithOtp({
-        phone: phoneValue,
-        options: { channel: "sms", captchaToken },
-      });
-      if (authError) {
-        setError(authError.message);
+      if (signInMode === "phone") {
+        if (!normalizedDigits) {
+          setError("Please enter your phone number.");
+          setMessage(null);
+          return;
+        }
+        const phoneValue = `+${normalizedDigits}`;
+        const { error: authError } = await supabase.auth.signInWithOtp({
+          phone: phoneValue,
+          options: { channel: "sms", captchaToken },
+        });
+        if (authError) {
+          setError(authError.message);
+          setMessage(null);
+        } else {
+          setMessage("Check your phone for a login code.");
+        }
       } else {
-        setMessage("Check your phone for a login code.");
+        const { error: authError } = await supabase.auth.signInWithOtp({
+          email: trimmed,
+          options: { emailRedirectTo: window.location.href, captchaToken },
+        });
+        if (authError) {
+          setError(authError.message);
+          setMessage(null);
+        } else {
+          setMessage("Check your email for a login link.");
+        }
       }
-    } else {
-      const { error: authError } = await supabase.auth.signInWithOtp({
-        email: trimmed,
-        options: { emailRedirectTo: window.location.href, captchaToken },
-      });
-      if (authError) {
-        setError(authError.message);
-      } else {
-        setMessage("Check your email for a login link.");
-      }
+    } finally {
+      setAuthInProgress(false);
     }
   };
 
   const handleProviderLogin = async (provider: "github" | "google") => {
     setError(null);
-    const captchaOk = await verifyTurnstile();
-    if (!captchaOk) return;
-    const { error: authError } = await supabase.auth.signInWithOAuth({
-      provider,
-      options: { redirectTo: window.location.href, captchaToken },
-    });
-    if (authError) {
-      setError(authError.message);
+    if (authInProgress) return;
+    setAuthInProgress(true);
+    setMessage("Logging in...");
+    try {
+      const captchaOk = await verifyTurnstile();
+      if (!captchaOk) {
+        setMessage(null);
+        return;
+      }
+      const { error: authError } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: window.location.href, captchaToken },
+      });
+      if (authError) {
+        setError(authError.message);
+        setMessage(null);
+      }
+    } finally {
+      setAuthInProgress(false);
     }
   };
 
@@ -214,7 +244,9 @@ export function AuthGate({ children }: AuthGateProps) {
               buttonClass="phone-input-flag"
               dropdownClass="phone-input-dropdown"
               placeholder="Enter phone number"
-              disabled={state === "loading" || verifyingCaptcha}
+              disabled={
+                state === "loading" || verifyingCaptcha || authInProgress
+              }
               inputProps={{
                 name: "phone",
                 required: true,
@@ -231,13 +263,17 @@ export function AuthGate({ children }: AuthGateProps) {
               type="email"
               inputMode="email"
               autoComplete="email"
-              disabled={state === "loading" || verifyingCaptcha}
+              disabled={
+                state === "loading" || verifyingCaptcha || authInProgress
+              }
             />
           )}
           <button
             onClick={handleSignIn}
             className="rounded-lg bg-white px-3 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-50"
-            disabled={state === "loading" || verifyingCaptcha}
+            disabled={
+              state === "loading" || verifyingCaptcha || authInProgress
+            }
           >
             {signInMode === "phone" ? "Send code" : "Send link"}
           </button>
@@ -273,7 +309,7 @@ export function AuthGate({ children }: AuthGateProps) {
                   setCaptchaError("Verification expired. Please retry.");
                   setCaptchaInstance((n) => n + 1);
                 }}
-                options={{ theme: "dark" }}
+                options={{ theme: "dark", refreshExpired: "manual" }}
               />
             )}
             {captchaError && (
@@ -286,7 +322,9 @@ export function AuthGate({ children }: AuthGateProps) {
           <button
             onClick={() => handleProviderLogin("github")}
             className="flex items-center justify-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
-            disabled={state === "loading" || verifyingCaptcha}
+            disabled={
+              state === "loading" || verifyingCaptcha || authInProgress
+            }
           >
             <Image
               src="/github.svg"
@@ -300,7 +338,9 @@ export function AuthGate({ children }: AuthGateProps) {
           <button
             onClick={() => handleProviderLogin("google")}
             className="flex items-center justify-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
-            disabled={state === "loading" || verifyingCaptcha}
+            disabled={
+              state === "loading" || verifyingCaptcha || authInProgress
+            }
           >
             <Image
               src="/google.svg"
