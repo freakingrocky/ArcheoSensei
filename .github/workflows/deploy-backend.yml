@@ -16,8 +16,7 @@ jobs:
 
     - name: Build Docker image locally
       run: |
-        cd Rust-backend
-        docker build -f backend_rust.Dockerfile -t archeo/backend:latest .
+        docker build -f Rust-backend/backend_rust.Dockerfile -t archeo/backend:latest .
 
     - name: Run blue/green deployment
       run: sudo /opt/archeosensei/redeploy.sh
