@@ -1312,6 +1312,7 @@ function ChatExperience({
   // UI / query state
   const [diag, setDiag] = useState<any>({});
   const [q, setQ] = useState("");
+  const lastJobFetchRef = useRef<number | null>(null);
 
   // modal (source)
   const [popupSource, setPopupSource] = useState<{
@@ -1390,6 +1391,12 @@ function ChatExperience({
       : 100;
 
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
+  const shouldPersistMessages = useCallback(() => {
+    if (!jobId) return true;
+    const lastFetch = lastJobFetchRef.current;
+    if (lastFetch === null) return false;
+    return Date.now() - lastFetch < 30_000;
+  }, [jobId]);
 
   const persistChats = useCallback(
     (nextChats: Chat[], ids: string[]) => {
@@ -1461,6 +1468,15 @@ function ChatExperience({
     );
   }, [activeId, user.id]);
 
+  // track last fetch for background persistence decisions
+  useEffect(() => {
+    if (jobId) {
+      lastJobFetchRef.current = Date.now();
+    } else {
+      lastJobFetchRef.current = null;
+    }
+  }, [jobId]);
+
   // autoscroll
   const messageCount = activeChat?.messages?.length ?? 0;
   useEffect(() => {
@@ -1527,9 +1543,10 @@ function ChatExperience({
     const query = q.trim();
     if (!query || (phase !== "idle" && phase !== "done")) return;
 
+    const persistIds = shouldPersistMessages() ? [activeChat.id] : undefined;
     applyChatUpdate(
       (prev) => appendMessage(prev, activeChat.id, { role: "user", content: query }),
-      [activeChat.id]
+      persistIds
     );
     setQ("");
     setPhase("sent");
@@ -1542,7 +1559,12 @@ function ChatExperience({
     setValidationModal(null);
     let jobStarted = false;
     try {
-      const { job_id } = await startQueryJob(query, { use_global: true });
+      const { job_id } = await startQueryJob(query, {
+        use_global: true,
+        user_id: user.id,
+        chat_id: activeChat.id,
+        chat_name: activeChat.name,
+      });
       jobChatRef.current = activeChat.id;
       setJobId(job_id);
       jobStarted = true;
@@ -1748,6 +1770,7 @@ function ChatExperience({
       try {
         const status = await fetchQueryJob(jobId);
         if (cancelled) return;
+        lastJobFetchRef.current = Date.now();
         setPhase(phaseFromJob(status.phase));
         if (typeof status.retry_count === "number") {
           setRetryCount(status.retry_count);
@@ -1796,6 +1819,9 @@ function ChatExperience({
 
           const targetChatId = jobChatRef.current || activeChat?.id;
           if (targetChatId) {
+            const persistIds = shouldPersistMessages()
+              ? [targetChatId]
+              : undefined;
             applyChatUpdate(
               (prev) =>
                 appendMessage(prev, targetChatId, {
@@ -1805,7 +1831,7 @@ function ChatExperience({
                   diagnostics: status.diagnostics || {},
                   fact_check: fact,
                 }),
-              [targetChatId]
+              persistIds
             );
           }
           setDiag(status.diagnostics || {});

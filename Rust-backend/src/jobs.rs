@@ -6,6 +6,20 @@ use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fetch: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JobRecord {
     pub job_id: String,
     pub status: String,
@@ -18,15 +32,17 @@ pub struct JobRecord {
     pub fact_ai_status: Option<String>,
     #[serde(default)]
     pub fact_claims_status: Option<String>,
+    #[serde(default)]
+    pub metadata: JobMetadata,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl JobRecord {
-    pub fn new(initial: Option<serde_json::Value>) -> Self {
+    pub fn new(initial: Option<JobMetadata>) -> Self {
         let job_id = Uuid::new_v4().simple().to_string();
         let now = Utc::now();
-        let mut record = JobRecord {
+        let record = JobRecord {
             job_id: job_id.clone(),
             status: "queued".to_string(),
             phase: "queued".to_string(),
@@ -35,15 +51,9 @@ impl JobRecord {
             attempts: Vec::new(),
             fact_ai_status: None,
             fact_claims_status: None,
+            metadata: initial.unwrap_or_default(),
             extra: serde_json::Map::new(),
         };
-        if let Some(value) = initial {
-            if let serde_json::Value::Object(obj) = value {
-                for (k, v) in obj {
-                    record.extra.insert(k, v);
-                }
-            }
-        }
         record
     }
 }
@@ -79,7 +89,7 @@ impl JobManager {
         }
     }
 
-    pub fn create_job(&self, initial: Option<serde_json::Value>) -> String {
+    pub fn create_job(&self, initial: Option<JobMetadata>) -> String {
         self.prune();
         let record = JobRecord::new(initial);
         let job_id = record.job_id.clone();
@@ -124,6 +134,13 @@ impl JobManager {
     pub fn append_attempt(&self, job_id: &str, attempt: serde_json::Value) {
         if let Some(mut entry) = self.inner.get_mut(job_id) {
             entry.attempts.push(attempt);
+            entry.updated_at = Utc::now();
+        }
+    }
+
+    pub fn touch_fetch(&self, job_id: &str) {
+        if let Some(mut entry) = self.inner.get_mut(job_id) {
+            entry.metadata.last_fetch = Some(Utc::now());
             entry.updated_at = Utc::now();
         }
     }
