@@ -1,4 +1,5 @@
 // frontend/src/lib/chats.ts
+import { supabase } from "./supabase";
 export type Hit = {
   id: string | number;
   tag: string;
@@ -66,45 +67,23 @@ export type Chat = {
   updatedAt: number;
   messages: Msg[];
 };
-
-const KEY = "archeo:chats:v1";
-const KEY_ACTIVE = "archeo:activeChatId";
-
-export function loadChats(): Chat[] {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw) as Chat[];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-export function saveChats(chats: Chat[]) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(chats));
-  } catch {}
-}
-
-export function loadActiveChatId(): string | null {
-  try {
-    return localStorage.getItem(KEY_ACTIVE);
-  } catch {
-    return null;
-  }
-}
-
-export function saveActiveChatId(id: string) {
-  try {
-    localStorage.setItem(KEY_ACTIVE, id);
-  } catch {}
-}
+export type ChatRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  messages: Msg[];
+  created_at: string;
+  updated_at: string;
+};
 
 export function createChat(name: string): Chat {
   const now = Date.now();
+  const id =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `chat_${now}_${Math.random().toString(36).slice(2)}`;
   return {
-    id: `chat_${now}_${Math.random().toString(36).slice(2)}`,
+    id,
     name,
     createdAt: now,
     updatedAt: now,
@@ -138,4 +117,60 @@ export function replaceMessages(
   return chats.map((c) =>
     c.id === id ? { ...c, messages, updatedAt: Date.now() } : c
   );
+}
+
+export async function fetchUserChats(userId: string): Promise<Chat[]> {
+  const { data, error } = await supabase
+    .from("user_chats")
+    .select("*")
+    .eq("user_id", userId)
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    throw error;
+  }
+
+  return (data || []).map(normalizeChatRow);
+}
+
+export async function upsertUserChat(
+  userId: string,
+  chat: Chat
+): Promise<void> {
+  const payload = serializeChat(userId, chat);
+  const { error } = await supabase.from("user_chats").upsert(payload);
+  if (error) throw error;
+}
+
+export async function deleteUserChat(
+  userId: string,
+  chatId: string
+): Promise<void> {
+  const { error } = await supabase
+    .from("user_chats")
+    .delete()
+    .eq("user_id", userId)
+    .eq("id", chatId);
+  if (error) throw error;
+}
+
+function normalizeChatRow(row: ChatRow): Chat {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at ? Date.parse(row.created_at) : Date.now(),
+    updatedAt: row.updated_at ? Date.parse(row.updated_at) : Date.now(),
+    messages: Array.isArray(row.messages) ? row.messages : [],
+  };
+}
+
+function serializeChat(userId: string, chat: Chat) {
+  return {
+    id: chat.id,
+    user_id: userId,
+    name: chat.name,
+    messages: chat.messages,
+    created_at: new Date(chat.createdAt).toISOString(),
+    updated_at: new Date(chat.updatedAt).toISOString(),
+  } satisfies ChatRow;
 }

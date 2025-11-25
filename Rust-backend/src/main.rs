@@ -16,8 +16,8 @@ use crate::routes::{
     query_async_status, quiz_grade, quiz_question, upload_lectures,
 };
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -80,7 +80,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         signal(SignalKind::terminate())
             .expect("failed to install signal handler")

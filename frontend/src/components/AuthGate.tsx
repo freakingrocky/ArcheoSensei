@@ -1,0 +1,373 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
+import { ensureUserProfile, type UserProfile } from "@/lib/profile";
+import Image from "next/image";
+import Turnstile from "react-turnstile";
+import PhoneInput from "react-phone-input-2";
+
+type AuthGateProps = {
+  children: (ctx: {
+    user: User;
+    profile: UserProfile;
+    signOut: () => Promise<void>;
+  }) => React.ReactNode;
+};
+
+type SignInViewState = "loading" | "ready" | "error";
+
+export function AuthGate({ children }: AuthGateProps) {
+  const [user, setUser] = useState<User | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [state, setState] = useState<SignInViewState>("loading");
+  const [contact, setContact] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaError, setCaptchaError] = useState<string | null>(null);
+  const [captchaInstance, setCaptchaInstance] = useState(0);
+  const [verifyingCaptcha, setVerifyingCaptcha] = useState(false);
+  const [captchaVerified, setCaptchaVerified] = useState(false);
+  const [authInProgress, setAuthInProgress] = useState(false);
+  const [phoneCountry, setPhoneCountry] = useState("us");
+
+  const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!mounted) return;
+        setUser(data.session?.user ?? null);
+        setState("ready");
+      })
+      .catch((err) => {
+        console.error("auth session error", err);
+        if (mounted) setState("error");
+      });
+
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setUser(session?.user ?? null);
+        setProfile(null);
+        setState("ready");
+      }
+    );
+
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    ensureUserProfile(user)
+      .then((p) => setProfile(p))
+      .catch((err) => {
+        console.error("profile error", err);
+        setError("Could not load your profile. Please try again.");
+      });
+  }, [user]);
+
+  const verifyTurnstile = async (token = captchaToken) => {
+    if (captchaVerified) return true;
+    if (verifyingCaptcha) return false;
+    if (!token) {
+      setCaptchaError("Please complete the verification.");
+      return false;
+    }
+
+    setVerifyingCaptcha(true);
+    setCaptchaError(null);
+    try {
+      const res = await fetch("/api/turnstile/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      if (!data?.success) {
+        setCaptchaError("Verification failed. Please try again.");
+        setCaptchaToken(null);
+        setCaptchaInstance((n) => n + 1);
+        setCaptchaVerified(false);
+        return false;
+      }
+      setCaptchaVerified(true);
+      return true;
+    } catch (err) {
+      console.error("turnstile verify error", err);
+      setCaptchaError("Could not verify the challenge. Please retry.");
+      setCaptchaToken(null);
+      setCaptchaInstance((n) => n + 1);
+      setCaptchaVerified(false);
+      return false;
+    } finally {
+      setVerifyingCaptcha(false);
+    }
+  };
+
+  const handleSignIn = async () => {
+    setMessage(null);
+    setError(null);
+    const trimmed = contact.trim();
+    if (!trimmed || authInProgress) return;
+    setAuthInProgress(true);
+    const statusText =
+      signInMode === "phone"
+        ? "Sending a code..."
+        : "Check your email for a login link.";
+    setMessage(statusText);
+    try {
+      if (!captchaVerified) {
+        const captchaOk = await verifyTurnstile();
+        if (!captchaOk) {
+          setMessage(null);
+          return;
+        }
+      }
+      const normalizedDigits = trimmed.replace(/\D/g, "");
+
+      if (signInMode === "phone") {
+        if (!normalizedDigits) {
+          setError("Please enter your phone number.");
+          setMessage(null);
+          return;
+        }
+        const phoneValue = `+${normalizedDigits}`;
+        const { error: authError } = await supabase.auth.signInWithOtp({
+          phone: phoneValue,
+          options: { channel: "sms", captchaToken },
+        });
+        if (authError) {
+          setError(authError.message);
+          setMessage(null);
+        } else {
+          setMessage("Check your phone for a login code.");
+        }
+      } else {
+        const { error: authError } = await supabase.auth.signInWithOtp({
+          email: trimmed,
+          options: { emailRedirectTo: window.location.href, captchaToken },
+        });
+        if (authError) {
+          setError(authError.message);
+          setMessage(null);
+        } else {
+          setMessage("Check your email for a login link.");
+        }
+      }
+    } finally {
+      setAuthInProgress(false);
+    }
+  };
+
+  const handleProviderLogin = async (provider: "github" | "google") => {
+    setError(null);
+    if (authInProgress) return;
+    setAuthInProgress(true);
+    setMessage("Logging in...");
+    try {
+      const captchaOk = await verifyTurnstile();
+      if (!captchaOk) {
+        setMessage(null);
+        return;
+      }
+      const { error: authError } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: window.location.href, captchaToken },
+      });
+      if (authError) {
+        setError(authError.message);
+        setMessage(null);
+      }
+    } finally {
+      setAuthInProgress(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setProfile(null);
+  };
+
+  const signInMode = useMemo<"email" | "phone">(() => {
+    if (/[a-zA-Z]/.test(contact)) return "email";
+    if (/\d/.test(contact)) return "phone";
+    return "email";
+  }, [contact]);
+
+  const ready = useMemo(() => Boolean(user && profile), [user, profile]);
+
+  if (ready) {
+    return (
+      <>
+        {children({ user: user!, profile: profile!, signOut: handleSignOut })}
+      </>
+    );
+  }
+
+  return (
+    <div className="min-h-[100dvh] bg-neutral-950 text-neutral-100 flex items-center justify-center px-4">
+      <div className="w-full max-w-md rounded-2xl border border-neutral-800 bg-neutral-900/70 p-6 shadow-xl">
+        <div className="mb-3 text-lg font-semibold">Sign in to continue</div>
+        <p className="text-sm text-neutral-400 mb-4">
+          Use email, phone, GitHub, or Google to access your profile and saved chats.
+        </p>
+        <label className="text-xs text-neutral-400">Email or phone</label>
+        <div className="mt-1 flex gap-2">
+          {signInMode === "phone" ? (
+            <PhoneInput
+              country={phoneCountry}
+              value={contact}
+              onChange={(value, data) => {
+                const nextValue = value ? (value.startsWith("+") ? value : `+${value}`) : "";
+                setContact(nextValue);
+                if (
+                  data &&
+                  typeof data === "object" &&
+                  "countryCode" in data &&
+                  typeof data.countryCode === "string"
+                ) {
+                  setPhoneCountry(data.countryCode);
+                }
+              }}
+              enableSearch
+              disableSearchIcon
+              countryCodeEditable={false}
+              containerClass="phone-input-container flex-1"
+              inputClass="phone-input-input"
+              buttonClass="phone-input-flag"
+              dropdownClass="phone-input-dropdown"
+              placeholder="Enter phone number"
+              disabled={
+                state === "loading" || verifyingCaptcha || authInProgress
+              }
+              inputProps={{
+                name: "phone",
+                required: true,
+                autoComplete: "tel",
+                inputMode: "tel",
+              }}
+            />
+          ) : (
+            <input
+              className="flex-1 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-neutral-700"
+              placeholder="you@example.com"
+              value={contact}
+              onChange={(e) => setContact(e.target.value)}
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              disabled={
+                state === "loading" || verifyingCaptcha || authInProgress
+              }
+            />
+          )}
+          <button
+            onClick={handleSignIn}
+            className="rounded-lg bg-white px-3 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-50"
+            disabled={
+              state === "loading" || verifyingCaptcha || authInProgress
+            }
+          >
+            {signInMode === "phone" ? "Send code" : "Send link"}
+          </button>
+        </div>
+
+        <div className="mt-4">
+          <label className="block text-xs text-neutral-400">Verification</label>
+          <div className="mt-2 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
+            {captchaVerified ? (
+              <div className="flex items-center gap-2 text-sm text-emerald-300">
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500/20 text-xs font-semibold text-emerald-200">
+                  ✓
+                </div>
+                User verified
+              </div>
+            ) : (
+              <Turnstile
+                key={captchaInstance}
+                sitekey={turnstileSiteKey}
+                onSuccess={(token) => {
+                  setCaptchaToken(token);
+                  setCaptchaError(null);
+                  verifyTurnstile(token);
+                }}
+                onError={() => {
+                  setCaptchaToken(null);
+                  setCaptchaVerified(false);
+                  setCaptchaError("Verification failed. Please retry.");
+                }}
+                onExpire={() => {
+                  setCaptchaToken(null);
+                  setCaptchaVerified(false);
+                  setCaptchaError("Verification expired. Please retry when you're ready.");
+                }}
+                options={{ theme: "dark", refreshExpired: "manual" }}
+              />
+            )}
+            {captchaError && (
+              <div className="mt-2 text-xs text-rose-300">{captchaError}</div>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button
+            onClick={() => handleProviderLogin("github")}
+            className="flex items-center justify-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
+            disabled={
+              state === "loading" || verifyingCaptcha || authInProgress
+            }
+          >
+            <Image
+              src="/github.svg"
+              alt="GitHub"
+              width={18}
+              height={18}
+              className="h-4 w-4"
+            />
+            Continue with GitHub
+          </button>
+          <button
+            onClick={() => handleProviderLogin("google")}
+            className="flex items-center justify-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm hover:border-neutral-700"
+            disabled={
+              state === "loading" || verifyingCaptcha || authInProgress
+            }
+          >
+            <Image
+              src="/google.svg"
+              alt="Google"
+              width={18}
+              height={18}
+              className="h-4 w-4"
+            />
+            Continue with Google
+          </button>
+        </div>
+
+        {message && (
+          <div className="mt-3 rounded-lg bg-emerald-900/40 px-3 py-2 text-xs text-emerald-200">
+            {message}
+          </div>
+        )}
+        {error && (
+          <div className="mt-3 rounded-lg bg-rose-900/40 px-3 py-2 text-xs text-rose-200">
+            {error}
+          </div>
+        )}
+        {state === "error" && (
+          <div className="mt-3 text-xs text-rose-300">
+            Unable to connect to Supabase. Please refresh and try again.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
