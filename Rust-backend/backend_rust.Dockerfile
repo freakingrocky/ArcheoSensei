@@ -4,7 +4,7 @@ FROM rust:1.79 AS builder
 WORKDIR /app
 
 # Only copy the backend folder into the container
-COPY ./Rust-backend ./
+COPY . .
 
 # Install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
