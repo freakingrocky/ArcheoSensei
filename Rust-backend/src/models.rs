@@ -10,6 +10,8 @@ pub struct QueryOptions {
     pub force_lecture_key: Option<String>,
     pub use_global: bool,
     pub user_id: Option<String>,
+    pub chat_id: Option<String>,
+    pub chat_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
