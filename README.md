@@ -11,3 +11,4 @@ cp .env.example .env
 ./scripts/dev-up.sh
 ```
 
+## Auto Deployment via Runners setup done
