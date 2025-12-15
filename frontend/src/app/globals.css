@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #020510;
+  --foreground: #e5e7eb;
 }
 
 @theme inline {
@@ -12,19 +12,28 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
-  background: var(--background);
+  background: radial-gradient(circle at 20% 20%, #0ea5e980, transparent 28%),
+    radial-gradient(circle at 80% 0%, #a855f780, transparent 25%),
+    linear-gradient(180deg, #020510 0%, #05060f 40%, #03040b 100%);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
 }
 
+/* Scrollbar glow */
+*::-webkit-scrollbar {
+  width: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: #05070f;
+}
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #67e8f9, #a78bfa);
+  border-radius: 999px;
+}
+
+/* Claim chips for fact checking */
 .claim-chip {
   position: relative;
   border-bottom: 2px dotted currentColor;
@@ -47,7 +56,7 @@ body {
   left: 0;
   bottom: 100%;
   transform: translateY(-0.35rem);
-  background: rgba(23, 23, 23, 0.95);
+  background: rgba(6, 9, 20, 0.95);
   color: #f5f5f5;
   padding: 0.5rem 0.75rem;
   border-radius: 0.5rem;
@@ -66,6 +75,7 @@ body {
   opacity: 1;
 }
 
+/* Evidence tooltip */
 .evidence-hover {
   position: relative;
 }
@@ -76,7 +86,7 @@ body {
   left: 0;
   bottom: 100%;
   transform: translateY(-0.4rem);
-  background: rgba(15, 23, 42, 0.96);
+  background: rgba(5, 7, 15, 0.96);
   color: #f1f5f9;
   padding: 0.5rem 0.75rem;
   border-radius: 0.75rem;
@@ -95,13 +105,14 @@ body {
   opacity: 1;
 }
 
+/* Phone input (auth) */
 .phone-input-container {
   width: 100%;
 }
 
 .phone-input-container .phone-input-flag {
-  background: #0a0a0a;
-  border: 1px solid #27272a;
+  background: #05070f;
+  border: 1px solid #1f2937;
   border-right: none;
   border-radius: 0.5rem 0 0 0.5rem;
   padding: 0 12px;
@@ -109,12 +120,12 @@ body {
 
 .phone-input-container .selected-flag:hover,
 .phone-input-container .selected-flag:focus {
-  background: #111827;
+  background: #0b1221;
 }
 
 .phone-input-container .phone-input-input {
-  background: #0a0a0a !important;
-  border: 1px solid #27272a !important;
+  background: #03040b !important;
+  border: 1px solid #1f2937 !important;
   border-radius: 0 0.5rem 0.5rem 0 !important;
   color: #e5e5e5 !important;
   width: 100% !important;
@@ -124,8 +135,8 @@ body {
 }
 
 .phone-input-container .phone-input-input:focus {
-  border-color: #404040 !important;
-  box-shadow: none !important;
+  border-color: #22d3ee !important;
+  box-shadow: 0 0 0 1px #22d3ee !important;
 }
 
 .phone-input-container .phone-input-input:disabled {
@@ -143,7 +154,7 @@ body {
 }
 
 .phone-input-dropdown .search-box {
-  background: #0a0a0a !important;
+  background: #03040b !important;
   border: 1px solid #1f2937 !important;
   color: #e5e5e5 !important;
 }
@@ -154,7 +165,7 @@ body {
 
 .phone-input-dropdown .country.highlight,
 .phone-input-dropdown .country:hover {
-  background: #1f2937 !important;
+  background: #111827 !important;
 }
 
 .phone-input-dropdown .dial-code {

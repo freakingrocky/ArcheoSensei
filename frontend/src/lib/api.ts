@@ -52,6 +52,29 @@ export async function fetchQueryJob(jobId: string): Promise<QueryJobStatus> {
   return res.json();
 }
 
+export type InsightsResponse = {
+  summary: string;
+  llm: {
+    model?: string | null;
+    latency_s?: number | null;
+  };
+  sample_conversations: number;
+};
+
+export async function fetchInsights(userId: string): Promise<InsightsResponse> {
+  const res = await fetch(`${backendBase()}/insights`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Insights error ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
 export type LectureItem = { lecture_key: string; count: number };
 
 export async function fetchLectures(): Promise<LectureItem[]> {
