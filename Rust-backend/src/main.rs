@@ -12,7 +12,7 @@ use crate::config::Settings;
 use crate::embedder::Embedder;
 use crate::jobs::JobManager;
 use crate::routes::{
-    get_source, health, insights, list_lectures, llm_models, memorize, query, query_async,
+    get_source, health, list_lectures, llm_models, memorize, query, query_async,
     query_async_status, quiz_grade, quiz_question, upload_lectures,
 };
 use axum::{
@@ -53,7 +53,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/query", post(query))
         .route("/query/async", post(query_async))
         .route("/query/async/:job_id", get(query_async_status))
-        .route("/insights", post(insights))
         .route("/llm/models", get(llm_models))
         .route("/lectures", get(list_lectures))
         .route("/source/:lecture_key/:slide_no", get(get_source))
