@@ -21,21 +21,6 @@ pub struct QueryRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct InsightsRequest {
-    pub user_id: String,
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct InsightsResponse {
-    pub summary: String,
-    pub llm: LlmInfo,
-    pub sample_conversations: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct MemorizeRequest {
     pub user_id: String,
     pub text: String,
