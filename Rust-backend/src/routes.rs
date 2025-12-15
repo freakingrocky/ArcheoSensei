@@ -11,6 +11,7 @@ use sqlx::Row;
 use std::sync::Arc;
 use tokio::task;
 use tracing::error;
+use uuid::Uuid;
 
 use crate::{
     config::Settings,
@@ -21,9 +22,9 @@ use crate::{
     llm::{self, FactCheckOutput},
     models::{
         AsyncJobResponse, FactCheckResult, FactProgressCallback, FactProgressEvent, HealthResponse,
-        MemorizeRequest, QueryOptions, QueryRequest, QueryResponse, QuizGradeRequest,
-        QuizGradeResponse, QuizQuestionRequest, QuizQuestionResponse, RetrieveDiagnostics,
-        RetrieveHit, RetrieveResult,
+        InsightsRequest, InsightsResponse, MemorizeRequest, QueryOptions, QueryRequest,
+        QueryResponse, QuizGradeRequest, QuizGradeResponse, QuizQuestionRequest,
+        QuizQuestionResponse, RetrieveDiagnostics, RetrieveHit, RetrieveResult,
     },
     retrieve,
 };
@@ -424,6 +425,91 @@ pub async fn query_async_status(
     };
     state.jobs.touch_fetch(&job_id);
     Ok(Json(job))
+}
+
+pub async fn insights(
+    State(state): State<AppState>,
+    Json(payload): Json<InsightsRequest>,
+) -> Result<Json<InsightsResponse>, ApiError> {
+    let user_id = Uuid::parse_str(&payload.user_id)
+        .map_err(|e| anyhow::anyhow!("invalid user_id UUID: {}", e))?;
+    let limit: i64 = payload
+        .limit
+        .unwrap_or(12)
+        .clamp(1, 50)
+        .try_into()
+        .unwrap_or(12);
+
+    let rows = sqlx::query(
+        "SELECT messages FROM user_chats WHERE user_id=$1 ORDER BY updated_at DESC LIMIT $2",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut transcripts: Vec<String> = Vec::new();
+    for row in rows {
+        let messages: Value = row.get("messages");
+        if let Some(items) = messages.as_array() {
+            let mut parts: Vec<String> = Vec::new();
+            for msg in items {
+                let role = msg
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("assistant");
+                if let Some(content) = msg.get("content").and_then(Value::as_str) {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(format!("{}: {}", role, trimmed));
+                    }
+                }
+            }
+            let transcript = parts.join("\n");
+            if !transcript.is_empty() {
+                transcripts.push(transcript);
+            }
+        }
+    }
+
+    let sample_conversations = transcripts.len();
+    if transcripts.is_empty() {
+        return Ok(Json(InsightsResponse {
+            summary: "I haven't seen any learning interactions yet. Ask a few questions first so I can analyze your style.".to_string(),
+            llm: Default::default(),
+            sample_conversations,
+        }));
+    }
+
+    let mut narrative = String::new();
+    for (idx, convo) in transcripts.iter().enumerate() {
+        narrative.push_str(&format!("Session {}\n{}\n\n", idx + 1, convo));
+        if narrative.len() > 6400 {
+            break;
+        }
+    }
+    if narrative.len() > 6800 {
+        narrative.truncate(6800);
+    }
+
+    let system_prompt =
+        "You are a futuristic learning intelligence that writes concise, motivational analysis. \n"
+            .to_string()
+            + "Break the response into four titled sections: My Insights, Strengths, Weaknesses, and Next Steps. \n"
+            + "Use tight bullet points with short neon-styled emojis (like ✨ or 🧠). Keep it under 220 words.";
+    let user_prompt = format!(
+        "Based on all my learning interactions, what are my insights, what are my strengths, what are my weaknesses, any general comments?\nHere are condensed transcripts:\n{}",
+        narrative
+    );
+
+    let (summary, llm) =
+        llm::generate_personalized_insights(&state.settings, &system_prompt, &user_prompt).await?;
+
+    Ok(Json(InsightsResponse {
+        summary,
+        llm,
+        sample_conversations,
+    }))
 }
 
 fn should_backend_persist(job: &JobRecord) -> bool {

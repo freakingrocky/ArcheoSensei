@@ -1213,3 +1213,15 @@ pub async fn grade_quiz_answer(
     let grade = serde_json::from_value(payload)?;
     Ok(grade)
 }
+
+pub async fn generate_personalized_insights(
+    settings: &Settings,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<(String, LlmInfo)> {
+    let messages = vec![
+        json!({"role": "system", "content": system_prompt}),
+        json!({"role": "user", "content": user_prompt}),
+    ];
+    call_sig_gpt5(settings, &messages).await
+}
