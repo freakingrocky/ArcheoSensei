@@ -26,6 +26,22 @@ pub struct MemorizeRequest {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct InsightsRequest {
+    pub user_id: String,
+    pub max_chats: Option<usize>,
+    pub max_messages_per_chat: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(default)]
+pub struct InsightsResponse {
+    pub insights: String,
+    pub llm: LlmInfo,
+    pub chat_count: usize,
+    pub message_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RetrieveDiagnostics {

@@ -1213,3 +1213,35 @@ pub async fn grade_quiz_answer(
     let grade = serde_json::from_value(payload)?;
     Ok(grade)
 }
+
+pub async fn build_learning_insights(
+    settings: &Settings,
+    transcript: &str,
+) -> Result<(String, LlmInfo)> {
+    let safe_transcript = transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if safe_transcript.is_empty() {
+        return Ok((
+            "I could not find any learning interactions yet. Start a chat or quiz and I will synthesize insights here.".to_string(),
+            LlmInfo::default(),
+        ));
+    }
+
+    let system = "You are a futuristic mentor distilling a learner's interactions into concise insights. Use an encouraging, actionable tone and keep things tight with bullet points.";
+    let user_prompt = format!(
+        "Based on all my learning interactions, what are my insights, what are my strengths, what are my weaknesses, any general comments.\n\nLearning interactions (latest first):\n{}\n\nReturn clear markdown with sections: Insights, Strengths, Weaknesses, Recommendations.",
+        safe_transcript
+    );
+
+    let messages = vec![
+        json!({"role": "system", "content": system}),
+        json!({"role": "user", "content": user_prompt}),
+    ];
+
+    call_sig_gpt5(settings, &messages).await
+}
