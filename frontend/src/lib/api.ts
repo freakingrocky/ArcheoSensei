@@ -92,17 +92,6 @@ export type QuizGradeResponse = {
   bad_points: string[];
 };
 
-export type InsightsResponse = {
-  insights: string;
-  llm: {
-    model?: string | null;
-    latency_s?: number | null;
-    usage?: any;
-  };
-  chat_count: number;
-  message_count: number;
-};
-
 export async function requestQuizQuestion(payload: {
   lecture_key?: string;
   topic?: string;
@@ -135,26 +124,6 @@ export async function gradeQuizAnswer(payload: {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Quiz grading error ${res.status}: ${text}`);
-  }
-  return res.json();
-}
-
-export async function fetchInsights(
-  payload: {
-    user_id: string;
-    max_chats?: number;
-    max_messages_per_chat?: number;
-  } = { user_id: "" }
-): Promise<InsightsResponse> {
-  const res = await fetch(`${backendBase()}/insights`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Insights error ${res.status}: ${text}`);
   }
   return res.json();
 }

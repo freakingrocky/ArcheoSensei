@@ -19,7 +19,6 @@ import {
   QuizQuestionPayload,
   QuizGradeResponse,
   QuizQuestionType,
-  fetchInsights,
 } from "@/lib/api";
 import {
   Chat,
@@ -1339,14 +1338,6 @@ function ChatExperience({
   const [factClaimsStatus, setFactClaimsStatus] = useState<
     "passed" | "failed" | null
   >(null);
-  const [insightsLoading, setInsightsLoading] = useState(false);
-  const [insightsError, setInsightsError] = useState<string | null>(null);
-  const [insightsText, setInsightsText] = useState("");
-  const [insightsMeta, setInsightsMeta] = useState<{
-    chatCount: number;
-    messageCount: number;
-    model: string | null;
-  }>({ chatCount: 0, messageCount: 0, model: null });
   const [validationModal, setValidationModal] = useState<{
     hits: Hit[];
     details?: string;
@@ -1406,32 +1397,6 @@ function ChatExperience({
     if (lastFetch === null) return false;
     return Date.now() - lastFetch < 30_000;
   }, [jobId]);
-
-  const triggerInsights = useCallback(
-    async (opts?: { force?: boolean }) => {
-      if (insightsLoading && !opts?.force) return;
-      setInsightsLoading(true);
-      setInsightsError(null);
-      try {
-        const res = await fetchInsights({
-          user_id: user.id,
-          max_chats: 8,
-          max_messages_per_chat: 12,
-        });
-        setInsightsText(res.insights || "");
-        setInsightsMeta({
-          chatCount: res.chat_count ?? 0,
-          messageCount: res.message_count ?? 0,
-          model: res.llm?.model ?? null,
-        });
-      } catch (err: any) {
-        setInsightsError(err?.message ?? "Unable to fetch insights");
-      } finally {
-        setInsightsLoading(false);
-      }
-    },
-    [insightsLoading, user.id]
-  );
 
   const persistChats = useCallback(
     (nextChats: Chat[], ids: string[]) => {
@@ -1518,12 +1483,6 @@ function ChatExperience({
     if (!messageCount) return;
     endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messageCount]);
-
-  useEffect(() => {
-    if (chatsLoading || insightsText) return;
-    if (!chats.length) return;
-    void triggerInsights();
-  }, [chats.length, chatsLoading, insightsText, triggerInsights]);
 
   // HUD cycling
   useEffect(() => {
@@ -2005,267 +1964,149 @@ function ChatExperience({
   const detectedLecture = diag?.lecture_forced || diag?.lecture_detected || "";
   const messages = activeChat?.messages || [];
 
-  const phaseLabel = (() => {
-    switch (phase) {
-      case "sent":
-        return "Dispatching";
-      case "retrieving":
-        return "Retrieving context";
-      case "llm":
-        return "Synthesizing";
-      case "fact_ai":
-      case "fact_claims":
-        return "Validating";
-      case "done":
-        return "Complete";
-      default:
-        return "Idle";
-    }
-  })();
-
   return (
-    <div className="relative min-h-[100dvh] overflow-hidden text-slate-100">
-      <div className="pointer-events-none absolute inset-0">
-        <div className="absolute -left-24 top-24 h-72 w-72 rounded-full bg-cyan-500/15 blur-3xl" />
-        <div className="absolute right-10 top-0 h-80 w-80 rounded-full bg-indigo-600/20 blur-[110px]" />
-        <div className="absolute bottom-10 left-10 h-96 w-96 rounded-full bg-fuchsia-600/10 blur-[140px]" />
-      </div>
-
-      <div className="relative z-10 mx-auto max-w-7xl px-4 py-6 lg:py-10 space-y-6">
-        <div className="glass-panel rounded-3xl p-4 lg:p-6 shadow-xl flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-3">
-              <div className="h-12 w-12 rounded-2xl bg-gradient-to-br from-cyan-400 via-indigo-500 to-purple-600 shadow-lg" />
-              <div>
-                <div className="text-xs uppercase tracking-[0.25em] text-cyan-200">
-                  ArcheoSensei
-                </div>
-                <div className="text-2xl font-semibold">Neon Learning Sphere</div>
+    <div className="min-h-[100dvh] bg-neutral-950 text-neutral-100 relative flex">
+      {/* Sidebar */}
+      <aside className="w-64 border-r border-neutral-900 bg-neutral-950/80 backdrop-blur-sm p-3 hidden md:flex md:flex-col">
+        <div className="mb-4 text-xs text-neutral-400">
+          <div className="flex items-center gap-3">
+            <InitialAvatar email={user.email} name={profile.display_name} />
+            <div>
+              <div className="text-sm font-semibold text-neutral-200 truncate">
+                {profile.display_name || user.email}
+              </div>
+              <div className="text-[11px] text-neutral-500 truncate">{user.email}</div>
+            </div>
+          </div>
+          <button
+            onClick={signOut}
+            className="mt-2 rounded-lg border border-neutral-800 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-900"
+          >
+            Sign out
+          </button>
+        </div>
+        <button
+          onClick={actionNewChat}
+          className="w-full mb-3 rounded-lg bg-white text-black font-semibold py-2 hover:opacity-90"
+        >
+          + New Chat
+        </button>
+        <button
+          onClick={handleOpenQuiz}
+          className="w-full mb-4 rounded-lg border border-neutral-800 text-neutral-200 font-semibold py-2 hover:bg-neutral-900"
+        >
+          🎯 Quiz Me
+        </button>
+        <div className="text-xs text-neutral-400 mb-2">Chats</div>
+        <div className="flex-1 overflow-auto space-y-1">
+          {chatsLoading && (
+            <div className="text-neutral-600 text-xs">Loading chats…</div>
+          )}
+          {syncError && (
+            <div className="text-rose-300 text-xs">{syncError}</div>
+          )}
+          {chats.map((c) => (
+            <div
+              key={c.id}
+              className={`group flex items-center justify-between gap-2 rounded-lg px-2 py-2 cursor-pointer
+                          ${
+                            activeId === c.id
+                              ? "bg-neutral-800 text-white"
+                              : "hover:bg-neutral-900 text-neutral-300"
+                          }`}
+              onClick={() => selectChat(c.id)}
+              title={c.name}
+            >
+              <div className="truncate">{c.name}</div>
+              <div className="opacity-0 group-hover:opacity-100 flex gap-2 text-xs">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    doRenameChat(c.id);
+                  }}
+                  className="hover:text-white"
+                >
+                  Rename
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    doDeleteChat(c.id);
+                  }}
+                  className="hover:text-red-300"
+                >
+                  Del
+                </button>
               </div>
             </div>
-            <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-slate-200">
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                Phase: {phaseLabel}
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                {detectedLecture ? `Lecture ${detectedLecture}` : "Auto-detecting lecture"}
-              </span>
-              <span className="hidden md:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                Account synced
-              </span>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2 text-[13px] text-slate-300">
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-              Glassmorphic interface
-            </span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-              AI fact-check shield
-            </span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-              Quiz + Insights engine
-            </span>
-          </div>
+          ))}
+          {!chats.length && !chatsLoading && (
+            <div className="text-neutral-600 text-xs">No chats yet.</div>
+          )}
         </div>
+      </aside>
 
-        <div className="grid items-start gap-4 lg:gap-6 lg:grid-cols-[360px,1fr]">
-          <aside className="glass-panel rounded-3xl p-4 lg:p-5 space-y-4">
-            <div className="flex items-center gap-3">
+      {/* Main */}
+      <div className="flex-1 min-w-0">
+        {/* Header */}
+        <header className="sticky top-0 z-10 border-b border-neutral-900 bg-neutral-950/70 backdrop-blur-md">
+          <div className="mx-auto max-w-3xl px-4 py-3 flex items-center gap-3">
+            <div className="h-6 w-6 rounded bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
+            <div className="font-semibold truncate">
+              {activeChat?.name || "ArcheoSensei"}
+            </div>
+            <div className="ml-auto flex items-center gap-3 text-xs text-neutral-400">
               <InitialAvatar
                 email={user.email}
                 name={profile.display_name}
-                className="h-12 w-12 text-base"
+                className="hidden sm:flex"
               />
-              <div className="min-w-0">
-                <div className="text-lg font-semibold truncate">
-                  {profile.display_name || user.email}
-                </div>
-                <div className="text-sm text-slate-400 truncate">{user.email}</div>
-                <div className="mt-1 flex items-center gap-2 text-[12px] text-slate-400">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                  Connected
-                </div>
-              </div>
-              <button
-                onClick={signOut}
-                className="ml-auto rounded-full border border-white/10 px-3 py-1 text-xs text-slate-200 hover:bg-white/10"
-              >
-                Sign out
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={actionNewChat}
-                className="neon-button rounded-xl px-4 py-3 text-sm font-semibold"
-              >
-                + New Chat
-              </button>
-              <button
-                onClick={handleOpenQuiz}
-                className="rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/60 hover:text-white"
-              >
-                🎯 Quiz Reactor
-              </button>
-            </div>
-
-            <div className="glass-panel rounded-2xl border-white/10 bg-white/5 p-4 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <div className="text-sm font-semibold">My Insights</div>
-                  <div className="text-xs text-slate-400">
-                    Synthesized from your chats & quizzes
-                  </div>
-                </div>
-                <button
-                  onClick={() => triggerInsights({ force: true })}
-                  className="rounded-full border border-cyan-400/50 bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/20 disabled:opacity-60"
-                  disabled={insightsLoading}
-                >
-                  {insightsLoading ? "Summoning" : "Refresh"}
-                </button>
-              </div>
-              {insightsError && (
-                <div className="text-xs text-rose-300">{insightsError}</div>
-              )}
-              {insightsLoading ? (
-                <div className="text-sm text-slate-300">Forging insights…</div>
-              ) : insightsText ? (
-                <div className="prose prose-invert max-w-none text-sm text-slate-100">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightsText}</ReactMarkdown>
-                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400">
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                      {insightsMeta.chatCount} chats
-                    </span>
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                      {insightsMeta.messageCount} touchpoints
-                    </span>
-                    {insightsMeta.model && (
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                        {insightsMeta.model}
-                      </span>
-                    )}
-                  </div>
-                </div>
+              {detectedLecture ? (
+                <>
+                  Detected lecture:{" "}
+                  <span className="px-2 py-0.5 rounded bg-neutral-800 text-indigo-300 font-mono">
+                    {detectedLecture}
+                  </span>
+                </>
               ) : (
-                <div className="rounded-xl border border-dashed border-white/15 bg-white/5 px-3 py-4 text-sm text-slate-300">
-                  No insights yet. Start chatting or refresh to generate a pulse.
-                </div>
+                <>Auto-detecting lecture…</>
               )}
-            </div>
-
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-              <div className="mb-2 flex items-center justify-between text-xs text-slate-300">
-                <span className="font-semibold uppercase tracking-wide">Chats</span>
-                <span className="text-slate-500">{chats.length || 0}</span>
-              </div>
-              <div className="max-h-[360px] overflow-auto space-y-1">
-                {chatsLoading && (
-                  <div className="text-slate-500 text-xs">Loading chats…</div>
-                )}
-                {syncError && (
-                  <div className="text-rose-300 text-xs">{syncError}</div>
-                )}
-                {chats.map((c) => (
-                  <div
-                    key={c.id}
-                    className={`group flex items-center justify-between gap-2 rounded-xl px-3 py-2 cursor-pointer transition border border-transparent ${
-                      activeId === c.id
-                        ? "bg-indigo-600/20 border-indigo-400/40 text-white"
-                        : "hover:bg-white/5 text-slate-200"
-                    }`}
-                    onClick={() => selectChat(c.id)}
-                    title={c.name}
-                  >
-                    <div className="truncate text-sm font-semibold">{c.name}</div>
-                    <div className="opacity-0 group-hover:opacity-100 flex gap-2 text-[11px] text-slate-300">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          doRenameChat(c.id);
-                        }}
-                        className="hover:text-white"
-                      >
-                        Rename
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          doDeleteChat(c.id);
-                        }}
-                        className="hover:text-rose-300"
-                      >
-                        Del
-                      </button>
-                    </div>
-                  </div>
-                ))}
-                {!chats.length && !chatsLoading && (
-                  <div className="text-slate-500 text-xs">No chats yet.</div>
-                )}
-              </div>
-            </div>
-          </aside>
-
-          <div className="glass-panel rounded-3xl p-4 lg:p-6 flex flex-col min-h-[70vh]">
-            <div className="flex flex-wrap items-center gap-3">
-              <div>
-                <div className="text-xs uppercase tracking-[0.3em] text-cyan-200">
-                  Active Thread
-                </div>
-                <div className="text-2xl font-semibold">
-                  {activeChat?.name || "ArcheoSensei"}
-                </div>
-              </div>
-              <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                  {phase === "idle" || phase === "done"
-                    ? "Standing by"
-                    : statusLine || LOADING_LINES[loadingLineIdx]}
-                </span>
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                  Fact AI: {factAiStatus || "pending"}
-                </span>
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                  Claims: {factClaimsStatus || "pending"}
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-4 flex-1 overflow-hidden rounded-2xl border border-white/10 bg-black/30">
-              <div
-                className="h-full overflow-auto px-4 py-6"
-                style={{ minHeight: "calc(60vh)" }}
-              >
-                {!messages.length ? (
-                  chatsLoading ? (
-                    <div className="text-center text-sm text-slate-500 pt-10">
-                      Loading your chats…
-                    </div>
-                  ) : (
-                    <EmptyState />
-                  )
-                ) : (
-                  <div className="space-y-5">
-                    {messages.map((m, i) => (
-                      <ChatTurn key={i} msg={m} onOpenCitation={openCitation} />
-                    ))}
-                  </div>
-                )}
-                <div ref={endOfMessagesRef} />
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <Composer
-                q={q}
-                setQ={setQ}
-                disabled={phase !== "idle" && phase !== "done"}
-                onSubmit={submit}
-              />
             </div>
           </div>
+        </header>
+
+        {/* Chat thread */}
+        <div className="mx-auto max-w-3xl px-4">
+          <div
+            className="pt-6 pb-40 overflow-auto"
+            style={{ minHeight: "calc(100dvh - 160px)" }}
+          >
+            {!messages.length ? (
+              chatsLoading ? (
+                <div className="text-center text-sm text-neutral-500 pt-10">
+                  Loading your chats…
+                </div>
+              ) : (
+                <EmptyState />
+              )
+            ) : (
+              <div className="space-y-5">
+                {messages.map((m, i) => (
+                  <ChatTurn key={i} msg={m} onOpenCitation={openCitation} />
+                ))}
+              </div>
+            )}
+            <div ref={endOfMessagesRef} />
+          </div>
         </div>
+
+        {/* Bottom composer */}
+        <Composer
+          q={q}
+          setQ={setQ}
+          disabled={phase !== "idle" && phase !== "done"}
+          onSubmit={submit}
+        />
       </div>
 
       {quizOpen && (

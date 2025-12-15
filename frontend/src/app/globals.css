@@ -1,11 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #030014;
-  --foreground: #e2e8f0;
-  --glass: rgba(255, 255, 255, 0.06);
-  --glass-stroke: rgba(255, 255, 255, 0.08);
-  --glow: 0 25px 80px rgba(88, 97, 255, 0.25);
+  --background: #ffffff;
+  --foreground: #171717;
 }
 
 @theme inline {
@@ -15,44 +12,17 @@
   --font-mono: var(--font-geist-mono);
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
 body {
-  min-height: 100vh;
-  background: radial-gradient(circle at 20% 20%, #111827, transparent 35%),
-    radial-gradient(circle at 80% 0%, #312e81, transparent 25%),
-    radial-gradient(circle at 10% 70%, #0ea5e9, transparent 30%),
-    linear-gradient(135deg, #020617 0%, #050112 40%, #05010f 100%);
+  background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
-}
-
-.glass-panel {
-  background: var(--glass);
-  border: 1px solid var(--glass-stroke);
-  backdrop-filter: blur(20px);
-  box-shadow: var(--glow);
-}
-
-.neon-button {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid rgba(99, 102, 241, 0.6);
-  background: linear-gradient(120deg, #312e81, #0ea5e9);
-  color: #e2e8f0;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-  box-shadow: 0 10px 30px rgba(14, 165, 233, 0.3);
-}
-
-.neon-button::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.12), transparent 40%);
-  pointer-events: none;
-}
-
-.neon-button:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 20px 40px rgba(14, 165, 233, 0.45);
+  font-family: Arial, Helvetica, sans-serif;
 }
 
 .claim-chip {
