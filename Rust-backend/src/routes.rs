@@ -18,12 +18,12 @@ use crate::{
     embedder::Embedder,
     ingest,
     jobs::{JobManager, JobMetadata, JobRecord},
-    llm::{self, FactCheckOutput},
+    llm::{self, FactCheckOutput, build_learning_insights},
     models::{
         AsyncJobResponse, FactCheckResult, FactProgressCallback, FactProgressEvent, HealthResponse,
-        MemorizeRequest, QueryOptions, QueryRequest, QueryResponse, QuizGradeRequest,
-        QuizGradeResponse, QuizQuestionRequest, QuizQuestionResponse, RetrieveDiagnostics,
-        RetrieveHit, RetrieveResult,
+        InsightsRequest, InsightsResponse, MemorizeRequest, QueryOptions, QueryRequest,
+        QueryResponse, QuizGradeRequest, QuizGradeResponse, QuizQuestionRequest,
+        QuizQuestionResponse, RetrieveDiagnostics, RetrieveHit, RetrieveResult,
     },
     retrieve,
 };
@@ -125,6 +125,62 @@ pub async fn memorize(
         .execute(&state.pool)
         .await?;
     Ok(Json(json!({"ok": true})))
+}
+
+pub async fn insights(
+    State(state): State<AppState>,
+    Json(payload): Json<InsightsRequest>,
+) -> Result<Json<InsightsResponse>, ApiError> {
+    let user_uuid = uuid::Uuid::parse_str(&payload.user_id)
+        .map_err(|e| anyhow::anyhow!("invalid user_id UUID: {}", e))?;
+    let max_chats = payload.max_chats.unwrap_or(6).clamp(1, 20);
+    let max_messages = payload.max_messages_per_chat.unwrap_or(12).clamp(1, 50);
+
+    let rows = sqlx::query(
+        "SELECT name, messages FROM user_chats WHERE user_id=$1 ORDER BY updated_at DESC LIMIT $2",
+    )
+    .bind(user_uuid)
+    .bind(max_chats as i64)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut transcript = String::new();
+    let mut chat_count = 0usize;
+    let mut message_count = 0usize;
+
+    for row in rows {
+        let chat_name: String = row.get("name");
+        let raw_messages: Value = row.get("messages");
+        let Some(messages) = raw_messages.as_array() else {
+            continue;
+        };
+        let mut window: Vec<Value> = messages.iter().rev().take(max_messages).cloned().collect();
+        window.reverse();
+        if window.is_empty() {
+            continue;
+        }
+        chat_count += 1;
+        transcript.push_str(&format!("Chat: {}\n", chat_name));
+        for msg in window {
+            let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
+            if content.trim().is_empty() {
+                continue;
+            }
+            let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
+            transcript.push_str(&format!("- {}: {}\n", role, content.trim()));
+            message_count += 1;
+        }
+        transcript.push('\n');
+    }
+
+    let (insights, llm) = build_learning_insights(&state.settings, &transcript).await?;
+
+    Ok(Json(InsightsResponse {
+        insights,
+        llm,
+        chat_count,
+        message_count,
+    }))
 }
 
 pub async fn query(
