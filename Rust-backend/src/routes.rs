@@ -106,9 +106,11 @@ pub async fn memorize(
     State(state): State<AppState>,
     Json(payload): Json<MemorizeRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let user_uuid = uuid::Uuid::parse_str(&payload.user_id)
+        .map_err(|e| anyhow::anyhow!("invalid user_id UUID: {}", e))?;
     let interaction_id: i64 =
         sqlx::query("INSERT INTO user_interactions(user_id, q_text) VALUES ($1,$2) RETURNING id")
-            .bind(&payload.user_id)
+            .bind(user_uuid)
             .bind(&payload.text)
             .fetch_one(&state.pool)
             .await?
@@ -116,7 +118,7 @@ pub async fn memorize(
     let embeddings = state.embedder.embed([payload.text.as_str()]).await?;
     let vector = pgvector::Vector::from(embeddings[0].clone());
     sqlx::query("INSERT INTO chunks (store_kind, tenant_id, doc_id, chunk_index, text, embedding, metadata) VALUES (3,$1,NULL,0,$2,$3,$4)")
-        .bind(&payload.user_id)
+        .bind(user_uuid)
         .bind(&payload.text)
         .bind(vector)
         .bind(json!({"source": "user_note", "interaction_id": interaction_id}))
