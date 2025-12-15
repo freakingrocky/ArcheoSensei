@@ -11,6 +11,7 @@ use crate::{
     embedder::Embedder,
     models::{RetrieveDiagnostics, RetrieveHit, RetrieveResult},
 };
+use tracing::{info, warn};
 
 async fn knn_store(
     pool: &DbPool,
@@ -248,6 +249,13 @@ pub async fn retrieve(
     let mut diagnostics = RetrieveDiagnostics::default();
     let mut merged: Vec<RetrieveHit> = Vec::new();
 
+    info!(
+        lecture_force = ?lecture_force,
+        use_global,
+        user_id_present = user_id.is_some(),
+        "starting retrieval"
+    );
+
     let lecture_hits = if let Some(force) = lecture_force {
         diagnostics.lecture_forced = Some(force.to_string());
         knn_lecture(pool, &qvec, force, 20).await?
@@ -299,13 +307,17 @@ pub async fn retrieve(
     }
 
     if let Some(user_id) = user_id {
+        let user_uuid = Uuid::parse_str(user_id).map_err(|error| {
+            warn!(%user_id, %error, "failed to parse user_id as UUID");
+            anyhow::anyhow!("invalid user_id UUID")
+        })?;
         let sql = "SELECT id, text, metadata, 1 - (embedding <=> $1::vector) AS score \
                    FROM chunks \
-                   WHERE store_kind = 3 AND tenant_id = $2 \
+                   WHERE store_kind = 3 AND tenant_id = $2::uuid \
                    ORDER BY embedding <=> $1::vector LIMIT 10";
         let rows: Vec<PgRow> = sqlx::query(sql)
             .bind(qvec.clone())
-            .bind(user_id)
+            .bind(user_uuid)
             .fetch_all(pool)
             .await?;
         for row in rows {
@@ -333,6 +345,12 @@ pub async fn retrieve(
     if hits.len() > 12 {
         hits.truncate(12);
     }
+
+    info!(
+        hit_count = hits.len(),
+        top_score = hits.first().map(|h| h.score),
+        "retrieval completed"
+    );
 
     let label = hits.first().and_then(|hit| {
         hit.citation
