@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 
+use serde_json::{Value, json};
+
 use anyhow::Context;
 use pgvector::Vector;
-use serde_json::json;
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
     db::DbPool,
     embedder::Embedder,
-    models::{RetrieveDiagnostics, RetrieveHit, RetrieveResult},
+    models::{ImageAsset, RetrieveDiagnostics, RetrieveHit, RetrieveResult},
 };
 use tracing::{info, warn};
 
@@ -113,6 +114,16 @@ fn row_to_hit(row: PgRow) -> RetrieveHit {
         file_url: row.try_get::<Option<String>, _>("FILE_URL").ok().flatten(),
         tag: None,
     }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }
 
 fn detect_lecture(candidates: &[RetrieveHit]) -> Option<(String, HashMap<String, f32>)> {
@@ -235,6 +246,124 @@ fn build_context_from_hits(hits: &[RetrieveHit]) -> String {
     blocks.join("\n\n")
 }
 
+fn serialize_area_description(area: &Value) -> String {
+    serde_json::to_string(area).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn build_image_context(asset: &ImageAsset) -> String {
+    let mut lines = Vec::new();
+    lines.push("IMAGE_ASSET".to_string());
+    lines.push(format!("IMG_URL: {}", asset.img_url));
+    if let Some(title) = asset.title.as_deref() {
+        if !title.trim().is_empty() {
+            lines.push(format!("TITLE: {}", title.trim()));
+        }
+    }
+    if let Some(desc) = asset.description.as_deref() {
+        if !desc.trim().is_empty() {
+            lines.push(format!("DESCRIPTION: {}", desc.trim()));
+        }
+    }
+    if let Some(notes) = asset.notes.as_deref() {
+        if !notes.trim().is_empty() {
+            lines.push(format!("NOTES: {}", notes.trim()));
+        }
+    }
+    if let Some(lecture) = asset.lecture_key.as_deref() {
+        if !lecture.trim().is_empty() {
+            lines.push(format!("LECTURE: {}", lecture.trim()));
+        }
+    }
+    lines.push(format!(
+        "AREA_DESCRIPTION: {}",
+        serialize_area_description(&asset.area_description)
+    ));
+    lines.join("\n")
+}
+
+async fn fetch_image_assets(
+    pool: &DbPool,
+    lecture_key: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<ImageAsset>> {
+    let rows: Vec<PgRow> = match lecture_key {
+        Some(key) => sqlx::query(
+            "SELECT img_url, title, description, notes, lecture_key, COALESCE(area_description, '[]'::jsonb) as area_description \n             FROM lecture_image_assets WHERE lecture_key = $1 ORDER BY updated_at DESC LIMIT $2",
+        )
+        .bind(key)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?,
+        None => sqlx::query(
+            "SELECT img_url, title, description, notes, lecture_key, COALESCE(area_description, '[]'::jsonb) as area_description \n             FROM lecture_image_assets ORDER BY updated_at DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?,
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ImageAsset {
+            img_url: row.get::<String, _>("img_url"),
+            title: row.try_get::<String, _>("title").ok(),
+            description: row.try_get::<String, _>("description").ok(),
+            notes: row.try_get::<String, _>("notes").ok(),
+            lecture_key: row.try_get::<String, _>("lecture_key").ok(),
+            area_description: row
+                .try_get::<Value, _>("area_description")
+                .unwrap_or_else(|_| json!([])),
+            similarity: None,
+        })
+        .collect())
+}
+
+async fn select_best_image_asset(
+    pool: &DbPool,
+    embedder: &Embedder,
+    query_embedding: &[f32],
+    query: &str,
+    lecture_hint: Option<&str>,
+) -> anyhow::Result<Option<ImageAsset>> {
+    let mut candidates = fetch_image_assets(pool, lecture_hint, 32).await?;
+    if candidates.is_empty() {
+        candidates = fetch_image_assets(pool, None, 24).await?;
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let embed_inputs: Vec<String> = candidates
+        .iter()
+        .map(|c| {
+            format!(
+                "{}\n{}\n{}\n{}\nQuery: {}",
+                c.title.clone().unwrap_or_default(),
+                c.description.clone().unwrap_or_default(),
+                c.notes.clone().unwrap_or_default(),
+                c.lecture_key.clone().unwrap_or_default(),
+                query
+            )
+        })
+        .collect();
+    let embeddings = embedder
+        .embed(embed_inputs.iter().map(|s| s.as_str()))
+        .await?;
+
+    let mut best: Option<ImageAsset> = None;
+    let mut best_score = f32::MIN;
+    for (mut asset, emb) in candidates.into_iter().zip(embeddings) {
+        let sim = cosine_similarity(query_embedding, &emb);
+        asset.similarity = Some(sim);
+        if sim > best_score {
+            best_score = sim;
+            best = Some(asset);
+        }
+    }
+
+    Ok(best)
+}
+
 pub async fn retrieve(
     pool: &DbPool,
     embedder: &Embedder,
@@ -244,7 +373,8 @@ pub async fn retrieve(
     user_id: Option<&str>,
 ) -> anyhow::Result<RetrieveResult> {
     let embeddings = embedder.embed([query]).await?;
-    let qvec = Vector::from(embeddings.into_iter().next().context("missing embedding")?);
+    let query_embedding = embeddings.into_iter().next().context("missing embedding")?;
+    let qvec = Vector::from(query_embedding.clone());
 
     let mut diagnostics = RetrieveDiagnostics::default();
     let mut merged: Vec<RetrieveHit> = Vec::new();
@@ -358,15 +488,32 @@ pub async fn retrieve(
             .or_else(|| readable_label(&hit.metadata))
     });
 
+    let lecture_hint = lecture_force.or(diagnostics.lecture_detected.as_deref());
+    let image_asset =
+        select_best_image_asset(pool, embedder, &query_embedding, query, lecture_hint).await?;
+
     Ok(RetrieveResult {
         diagnostics,
         hits,
         label,
+        image_asset,
     })
 }
 
 pub fn build_context(hits: &[RetrieveHit]) -> String {
     build_context_from_hits(hits)
+}
+
+pub fn build_context_with_image(hits: &[RetrieveHit], image: Option<&ImageAsset>) -> String {
+    let mut context = build_context_from_hits(hits);
+    if let Some(asset) = image {
+        let image_block = build_image_context(asset);
+        if !context.is_empty() {
+            context.push_str("\n\n");
+        }
+        context.push_str(&image_block);
+    }
+    context
 }
 
 pub async fn retrieve_priority_hits(
