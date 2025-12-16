@@ -12,6 +12,7 @@ pub struct QueryOptions {
     pub user_id: Option<String>,
     pub chat_id: Option<String>,
     pub chat_name: Option<String>,
+    pub user_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

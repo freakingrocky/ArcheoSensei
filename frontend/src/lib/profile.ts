@@ -5,6 +5,7 @@ export type UserProfile = {
   id: string;
   display_name: string | null;
   active_chat_id: string | null;
+  context: string | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -55,11 +56,28 @@ export async function updateActiveChatId(
   if (error) throw error;
 }
 
+export async function updateUserContext(
+  userId: string,
+  context: string
+): Promise<UserProfile> {
+  const { data, error } = await supabase
+    .from("user_profiles")
+    .update({ context })
+    .eq("id", userId)
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  return normalizeProfile(data);
+}
+
 function normalizeProfile(row: any): UserProfile {
   return {
     id: row.id,
     display_name: row.display_name ?? null,
     active_chat_id: row.active_chat_id ?? null,
+    context: row.context ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
