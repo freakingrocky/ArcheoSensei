@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
@@ -322,30 +322,24 @@ async fn select_best_image_asset(
     pool: &DbPool,
     embedder: &Embedder,
     query_embedding: &[f32],
-    query: &str,
     lecture_hint: Option<&str>,
 ) -> anyhow::Result<Option<ImageAsset>> {
     let mut candidates = fetch_image_assets(pool, lecture_hint, 32).await?;
-    if candidates.is_empty() {
-        candidates = fetch_image_assets(pool, None, 24).await?;
+    let mut seen_urls: HashSet<String> = candidates.iter().map(|c| c.img_url.clone()).collect();
+
+    // Bring in a global fallback set so we are not stuck with a stale lecture-specific asset
+    // when the question clearly aligns better with a different reference image.
+    for asset in fetch_image_assets(pool, None, 24).await? {
+        if seen_urls.insert(asset.img_url.clone()) {
+            candidates.push(asset);
+        }
     }
+
     if candidates.is_empty() {
         return Ok(None);
     }
 
-    let embed_inputs: Vec<String> = candidates
-        .iter()
-        .map(|c| {
-            format!(
-                "{}\n{}\n{}\n{}\nQuery: {}",
-                c.title.clone().unwrap_or_default(),
-                c.description.clone().unwrap_or_default(),
-                c.notes.clone().unwrap_or_default(),
-                c.lecture_key.clone().unwrap_or_default(),
-                query
-            )
-        })
-        .collect();
+    let embed_inputs: Vec<String> = candidates.iter().map(|c| build_image_context(c)).collect();
     let embeddings = embedder
         .embed(embed_inputs.iter().map(|s| s.as_str()))
         .await?;
@@ -490,7 +484,7 @@ pub async fn retrieve(
 
     let lecture_hint = lecture_force.or(diagnostics.lecture_detected.as_deref());
     let image_asset =
-        select_best_image_asset(pool, embedder, &query_embedding, query, lecture_hint).await?;
+        select_best_image_asset(pool, embedder, &query_embedding, lecture_hint).await?;
 
     Ok(RetrieveResult {
         diagnostics,
