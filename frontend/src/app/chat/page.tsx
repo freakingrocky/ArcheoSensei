@@ -2098,7 +2098,9 @@ function ChatExperience({
               <div className="text-sm font-semibold text-neutral-200 truncate">
                 {profile.display_name || user.email}
               </div>
-              <div className="text-[11px] text-neutral-500 truncate">{user.email}</div>
+              <div className="text-[11px] text-neutral-500 truncate">
+                {user.email}
+              </div>
             </div>
           </div>
           <button
@@ -2546,7 +2548,8 @@ function ChatExperience({
                   My Insights
                 </h2>
                 <p className="text-sm text-neutral-400">
-                  Based on your latest chats and quizzes. Ratings are 0-100 for each concept.
+                  Based on your latest chats and quizzes. Ratings are 0-100 for
+                  each concept.
                 </p>
               </div>
               <div className="flex gap-2">
@@ -2617,7 +2620,9 @@ function ChatExperience({
                             </li>
                           ))}
                           {!insights.strengths.length && (
-                            <li className="text-neutral-500">No strengths detected yet.</li>
+                            <li className="text-neutral-500">
+                              No strengths detected yet.
+                            </li>
                           )}
                         </ul>
                       </div>
@@ -2633,7 +2638,9 @@ function ChatExperience({
                             </li>
                           ))}
                           {!insights.weaknesses.length && (
-                            <li className="text-neutral-500">No weaknesses detected yet.</li>
+                            <li className="text-neutral-500">
+                              No weaknesses detected yet.
+                            </li>
                           )}
                         </ul>
                       </div>
@@ -2647,7 +2654,7 @@ function ChatExperience({
                     <div className="text-xs uppercase tracking-wide text-neutral-500">
                       Per-concept ratings
                     </div>
-                    <div className="mt-3 space-y-3">
+                    <div className="mt-3 space-y-3 max-h-[420px] overflow-y-auto pr-2">
                       {insights.concepts.length ? (
                         insights.concepts.map((concept, idx) => (
                           <div
@@ -2655,7 +2662,10 @@ function ChatExperience({
                             className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-3"
                           >
                             <div className="flex items-center gap-2 text-sm font-semibold text-neutral-100">
-                              <span className="flex-1 truncate" title={concept.name}>
+                              <span
+                                className="flex-1 truncate"
+                                title={concept.name}
+                              >
                                 {concept.name}
                               </span>
                               <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs text-indigo-200">
@@ -2665,7 +2675,9 @@ function ChatExperience({
                             <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-neutral-800">
                               <div
                                 className="h-full rounded-full bg-indigo-500"
-                                style={{ width: `${clampRating(concept.rating)}%` }}
+                                style={{
+                                  width: `${clampRating(concept.rating)}%`,
+                                }}
                               />
                             </div>
                             <div className="mt-2 grid gap-2 sm:grid-cols-2">
@@ -2676,7 +2688,9 @@ function ChatExperience({
                                 <ul className="mt-1 space-y-1 text-xs text-neutral-200">
                                   {concept.strengths?.length ? (
                                     concept.strengths.map((item, subIdx) => (
-                                      <li key={`c-s-${idx}-${subIdx}`}>{item}</li>
+                                      <li key={`c-s-${idx}-${subIdx}`}>
+                                        {item}
+                                      </li>
                                     ))
                                   ) : (
                                     <li className="text-neutral-500">–</li>
@@ -2690,7 +2704,9 @@ function ChatExperience({
                                 <ul className="mt-1 space-y-1 text-xs text-neutral-200">
                                   {concept.weaknesses?.length ? (
                                     concept.weaknesses.map((item, subIdx) => (
-                                      <li key={`c-w-${idx}-${subIdx}`}>{item}</li>
+                                      <li key={`c-w-${idx}-${subIdx}`}>
+                                        {item}
+                                      </li>
                                     ))
                                   ) : (
                                     <li className="text-neutral-500">–</li>
@@ -2705,7 +2721,9 @@ function ChatExperience({
                                 </div>
                                 <ul className="mt-1 space-y-1 text-xs text-neutral-200">
                                   {concept.actions.map((action, subIdx) => (
-                                    <li key={`c-a-${idx}-${subIdx}`}>{action}</li>
+                                    <li key={`c-a-${idx}-${subIdx}`}>
+                                      {action}
+                                    </li>
                                   ))}
                                 </ul>
                               </div>
@@ -2732,7 +2750,9 @@ function ChatExperience({
                         </li>
                       ))}
                       {!insights.recommendations.length && (
-                        <li className="text-neutral-500">No recommendations available yet.</li>
+                        <li className="text-neutral-500">
+                          No recommendations available yet.
+                        </li>
                       )}
                     </ul>
                   </div>
