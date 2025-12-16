@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use std::sync::Arc;
 use tokio::task;
-use tracing::error;
+use tracing::{error, warn};
+use uuid::Uuid;
 
 use crate::{
     config::Settings,
@@ -108,6 +109,46 @@ fn answer_with_image_fallback(
         Some(text) if text.contains("```annotated-image") => Some(text),
         Some(text) => Some(format!("{}\n\n{}", text.trim_end(), asset_block)),
         None => Some(asset_block),
+    }
+}
+
+async fn load_user_context(pool: &DbPool, options: &QueryOptions) -> Option<String> {
+    if let Some(raw) = options.user_context.as_ref().and_then(|ctx| {
+        let trimmed = ctx.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }) {
+        return Some(raw);
+    }
+
+    let Some(user_id) = options.user_id.as_deref() else {
+        return None;
+    };
+
+    let user_uuid = match Uuid::parse_str(user_id) {
+        Ok(id) => id,
+        Err(error) => {
+            warn!(%user_id, %error, "invalid user_id for profile context");
+            return None;
+        }
+    };
+
+    match sqlx::query("SELECT context FROM user_profiles WHERE id=$1")
+        .bind(user_uuid)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(row)) => {
+            let value: Option<String> = row.get("context");
+            value.and_then(|ctx| {
+                let trimmed = ctx.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        }
+        Ok(None) => None,
+        Err(error) => {
+            warn!(%user_id, %error, "failed to load profile context");
+            None
+        }
     }
 }
 
@@ -236,7 +277,9 @@ pub async fn query(
         user_id: None,
         chat_id: None,
         chat_name: None,
+        user_context: None,
     });
+    let user_context = load_user_context(&state.pool, &options).await;
     let RetrieveResult {
         diagnostics,
         hits,
@@ -251,7 +294,10 @@ pub async fn query(
         options.user_id.as_deref(),
     )
     .await?;
-    let context = retrieve::build_context_with_image(&hits, image_asset.as_ref());
+    let mut context = retrieve::build_context_with_image(&hits, image_asset.as_ref());
+    if let Some(extra) = user_context.as_deref() {
+        context = format!("User context:\n{}\n\n{}", extra, context);
+    }
     let FactCheckOutput {
         answer,
         fact_check,
@@ -297,6 +343,10 @@ pub async fn query_async(
             .options
             .as_ref()
             .and_then(|opts| opts.chat_name.clone()),
+        user_context: payload
+            .options
+            .as_ref()
+            .and_then(|opts| opts.user_context.clone()),
         query: Some(payload.query.clone()),
         last_fetch: None,
     };
@@ -321,7 +371,9 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
         user_id: None,
         chat_id: None,
         chat_name: None,
+        user_context: None,
     });
+    let user_context = load_user_context(&state.pool, &options).await;
     let result = retrieve::retrieve(
         &state.pool,
         &state.embedder,
@@ -360,8 +412,11 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             return Ok(());
         }
     };
-    let context =
+    let mut context =
         retrieve::build_context_with_image(&retrieval.hits, retrieval.image_asset.as_ref());
+    if let Some(extra) = user_context.as_deref() {
+        context = format!("User context:\n{}\n\n{}", extra, context);
+    }
     state.jobs.update_job(
         &job_id,
         json!({

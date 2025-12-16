@@ -14,6 +14,8 @@ pub struct JobMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fetch: Option<DateTime<Utc>>,

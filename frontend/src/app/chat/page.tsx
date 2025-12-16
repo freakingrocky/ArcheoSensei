@@ -39,7 +39,11 @@ import {
   deleteUserChat,
 } from "@/lib/chat";
 import { AuthGate } from "@/components/AuthGate";
-import { updateActiveChatId, type UserProfile } from "@/lib/profile";
+import {
+  updateActiveChatId,
+  updateUserContext,
+  type UserProfile,
+} from "@/lib/profile";
 import type { User } from "@supabase/supabase-js";
 
 // ------- constants / helpers -------
@@ -1424,6 +1428,13 @@ function ChatExperience({
   );
   const [chatsLoading, setChatsLoading] = useState(true);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [profileDetails, setProfileDetails] = useState(profile);
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileContext, setProfileContext] = useState<string>(
+    profile.context || ""
+  );
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const hydratedRef = useRef(false);
   const activeChat = useMemo<Chat | null>(
     () => chats.find((c) => c.id === activeId) || null,
@@ -1499,6 +1510,13 @@ function ChatExperience({
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [insightsError, setInsightsError] = useState("");
+  const metadata = (user.user_metadata || {}) as Record<string, any>;
+  const avatarUrl = metadata.avatar_url || metadata.picture || null;
+
+  useEffect(() => {
+    setProfileDetails(profile);
+    setProfileContext(profile.context || "");
+  }, [profile]);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const quizTypeIndexRef = useRef(0);
   const quizTypes: QuizQuestionType[] = [
@@ -1681,6 +1699,28 @@ function ChatExperience({
     if (activeId === id) setActiveId(next[0]?.id || null);
   }
 
+  const closeProfileModal = () => {
+    setProfileModalOpen(false);
+    setProfileMessage(null);
+    setProfileContext(profileDetails.context || "");
+  };
+
+  async function saveProfileContext() {
+    setProfileSaving(true);
+    setProfileMessage(null);
+    try {
+      const updated = await updateUserContext(profile.id, profileContext.trim());
+      setProfileDetails(updated);
+      setProfileContext(updated.context || "");
+      setProfileMessage("Profile updated");
+    } catch (err) {
+      console.error("Failed to update profile context", err);
+      setProfileMessage("Could not save your profile. Please try again.");
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
   // submit question
   const submit = async () => {
     if (chatsLoading) return;
@@ -1714,6 +1754,7 @@ function ChatExperience({
         user_id: user.id,
         chat_id: activeChat.id,
         chat_name: activeChat.name,
+        user_context: profileDetails.context?.trim() || undefined,
       });
       if (jobId && jobChatRef.current) {
         addBackgroundJob(jobId, jobChatRef.current);
@@ -2201,10 +2242,15 @@ function ChatExperience({
       <aside className="w-64 border-r border-neutral-900 bg-neutral-950/80 backdrop-blur-sm p-3 hidden md:flex md:flex-col">
         <div className="mb-4 text-xs text-neutral-400">
           <div className="flex items-center gap-3">
-            <InitialAvatar email={user.email} name={profile.display_name} />
+            <ProfileAvatar
+              avatarUrl={avatarUrl}
+              email={user.email}
+              name={profileDetails.display_name}
+              onClick={() => setProfileModalOpen(true)}
+            />
             <div>
               <div className="text-sm font-semibold text-neutral-200 truncate">
-                {profile.display_name || user.email}
+                {profileDetails.display_name || user.email}
               </div>
               <div className="text-[11px] text-neutral-500 truncate">
                 {user.email}
@@ -2295,10 +2341,12 @@ function ChatExperience({
               {activeChat?.name || "ArcheoSensei"}
             </div>
             <div className="ml-auto flex items-center gap-3 text-xs text-neutral-400">
-              <InitialAvatar
+              <ProfileAvatar
+                avatarUrl={avatarUrl}
                 email={user.email}
-                name={profile.display_name}
-                className="hidden sm:flex"
+                name={profileDetails.display_name}
+                buttonClassName="hidden sm:flex"
+                onClick={() => setProfileModalOpen(true)}
               />
               {detectedLecture ? (
                 <>
@@ -2346,6 +2394,92 @@ function ChatExperience({
           onSubmit={submit}
         />
       </div>
+
+      {profileModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={closeProfileModal}
+        >
+          <div
+            className="w-full max-w-xl rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt={profileDetails.display_name || user.email}
+                    className="h-12 w-12 rounded-full object-cover"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <InitialAvatar
+                    email={user.email}
+                    name={profileDetails.display_name}
+                    className="h-12 w-12 text-lg"
+                  />
+                )}
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-neutral-500">
+                    Signed in as
+                  </div>
+                  <div className="text-lg font-semibold text-neutral-100">
+                    {profileDetails.display_name || user.email}
+                  </div>
+                  <div className="text-sm text-neutral-400">{user.email}</div>
+                </div>
+              </div>
+              <button
+                onClick={closeProfileModal}
+                className="rounded-full border border-neutral-700 px-3 py-1 text-sm text-neutral-300 hover:bg-neutral-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-neutral-200">
+                  Personal context
+                </label>
+                <span className="text-[11px] text-neutral-500">
+                  Used to personalize answers
+                </span>
+              </div>
+              <textarea
+                value={profileContext}
+                onChange={(e) => setProfileContext(e.target.value)}
+                placeholder="Add notes you want ArcheoSensei to remember (e.g., topics you're unsure about)."
+                className="min-h-[140px] w-full rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-neutral-700"
+              />
+              <div className="text-xs text-neutral-500">
+                We’ll include this context with every question so responses stay aligned with your needs.
+              </div>
+              {profileMessage && (
+                <div className="rounded-md border border-neutral-700 bg-neutral-800/60 px-3 py-2 text-xs text-neutral-200">
+                  {profileMessage}
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={closeProfileModal}
+                  className="rounded-lg border border-neutral-800 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800/60"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveProfileContext}
+                  disabled={profileSaving}
+                  className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-60"
+                >
+                  {profileSaving ? "Saving…" : "Save & use"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {quizOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
@@ -3249,6 +3383,46 @@ function InitialAvatar({
     >
       {letter}
     </div>
+  );
+}
+
+function ProfileAvatar({
+  avatarUrl,
+  email,
+  name,
+  onClick,
+  buttonClassName = "",
+  avatarClassName = "",
+}: {
+  avatarUrl?: string | null;
+  email?: string | null;
+  name?: string | null;
+  onClick?: () => void;
+  buttonClassName?: string;
+  avatarClassName?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group relative rounded-full border border-transparent p-0.5 hover:border-neutral-700 focus:outline-none focus:ring-2 focus:ring-neutral-700 ${buttonClassName}`}
+      title="View profile"
+    >
+      {avatarUrl ? (
+        <img
+          src={avatarUrl}
+          alt={name || email || "User avatar"}
+          className={`h-8 w-8 rounded-full object-cover ${avatarClassName}`}
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <InitialAvatar
+          email={email || undefined}
+          name={name || undefined}
+          className={avatarClassName}
+        />
+      )}
+    </button>
   );
 }
 
