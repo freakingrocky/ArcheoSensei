@@ -33,6 +33,8 @@ export function AuthGate({ children }: AuthGateProps) {
   const [authInProgress, setAuthInProgress] = useState(false);
   const [phoneCountry, setPhoneCountry] = useState("us");
 
+  const refreshCaptcha = () => setCaptchaInstance((n) => n + 1);
+
   const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
   useEffect(() => {
     let mounted = true;
@@ -92,7 +94,7 @@ export function AuthGate({ children }: AuthGateProps) {
       if (!data?.success) {
         setCaptchaError("Verification failed. Please try again.");
         setCaptchaToken(null);
-        setCaptchaInstance((n) => n + 1);
+        refreshCaptcha();
         setCaptchaVerified(false);
         return false;
       }
@@ -102,7 +104,7 @@ export function AuthGate({ children }: AuthGateProps) {
       console.error("turnstile verify error", err);
       setCaptchaError("Could not verify the challenge. Please retry.");
       setCaptchaToken(null);
-      setCaptchaInstance((n) => n + 1);
+      refreshCaptcha();
       setCaptchaVerified(false);
       return false;
     } finally {
@@ -302,13 +304,15 @@ export function AuthGate({ children }: AuthGateProps) {
                   setCaptchaToken(null);
                   setCaptchaVerified(false);
                   setCaptchaError("Verification failed. Please retry.");
+                  refreshCaptcha();
                 }}
                 onExpire={() => {
                   setCaptchaToken(null);
                   setCaptchaVerified(false);
-                  setCaptchaError("Verification expired. Please retry when you're ready.");
+                  setCaptchaError(null);
+                  refreshCaptcha();
                 }}
-                options={{ theme: "dark", refreshExpired: "manual" }}
+                options={{ theme: "dark", refreshExpired: "auto" }}
               />
             )}
             {captchaError && (

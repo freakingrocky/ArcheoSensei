@@ -19,6 +19,7 @@ import {
   QuizQuestionPayload,
   QuizGradeResponse,
   QuizQuestionType,
+  QueryJobStatus,
   fetchInsights,
   type InsightsResponse,
   type InsightConcept,
@@ -1425,6 +1426,9 @@ function ChatExperience({
   // HUD
   const [phase, setPhase] = useState<Phase>("idle");
   const [jobId, setJobId] = useState<string | null>(null);
+  const [backgroundJobs, setBackgroundJobs] = useState<
+    Map<string, { chatId: string }>
+  >(() => new Map());
   const [loadingLineIdx, setLoadingLineIdx] = useState(0);
   const [statusLine, setStatusLine] = useState("");
   const [retryCount, setRetryCount] = useState(0);
@@ -1523,6 +1527,23 @@ function ChatExperience({
     },
     [persistChats]
   );
+
+  const addBackgroundJob = useCallback((job: string, chatId: string) => {
+    setBackgroundJobs((prev) => {
+      const next = new Map(prev);
+      next.set(job, { chatId });
+      return next;
+    });
+  }, []);
+
+  const removeBackgroundJob = useCallback((job: string) => {
+    setBackgroundJobs((prev) => {
+      if (!prev.has(job)) return prev;
+      const next = new Map(prev);
+      next.delete(job);
+      return next;
+    });
+  }, []);
 
   // load chats on mount from Supabase
   useEffect(() => {
@@ -1667,6 +1688,9 @@ function ChatExperience({
         chat_id: activeChat.id,
         chat_name: activeChat.name,
       });
+      if (jobId && jobChatRef.current) {
+        addBackgroundJob(jobId, jobChatRef.current);
+      }
       jobChatRef.current = activeChat.id;
       setJobId(job_id);
       jobStarted = true;
@@ -1872,9 +1896,19 @@ function ChatExperience({
   };
 
   useEffect(() => {
-    if (!jobId) return;
+    const entries = [
+      ...(jobId && jobChatRef.current
+        ? [{ jobId, chatId: jobChatRef.current, active: true }]
+        : []),
+      ...Array.from(backgroundJobs.entries()).map(([id, meta]) => ({
+        jobId: id,
+        chatId: meta.chatId,
+        active: false,
+      })),
+    ].filter((entry) => Boolean(entry.chatId));
+
+    if (!entries.length) return;
     let cancelled = false;
-    let handled = false;
 
     const phaseFromJob = (jobPhase: string): Phase => {
       switch (jobPhase) {
@@ -1895,106 +1929,143 @@ function ChatExperience({
       }
     };
 
-    const poll = async () => {
-      try {
-        const status = await fetchQueryJob(jobId);
-        if (cancelled) return;
-        lastJobFetchRef.current = Date.now();
-        setPhase(phaseFromJob(status.phase));
-        if (typeof status.retry_count === "number") {
-          setRetryCount(status.retry_count);
+    const handleCompletion = (
+      entry: { jobId: string; chatId: string; active: boolean },
+      status: QueryJobStatus
+    ) => {
+      const fact = status.fact_check as FactCheckResult | undefined;
+      const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
+
+      if (entry.active) {
+        if (status.status === "failed" && !status.message) {
+          setStatusLine("AI response could not be validated after retries.");
         }
-        if (typeof status.max_attempts === "number") {
-          setMaxRetries(status.max_attempts);
+
+        const jobFailed =
+          status.status === "failed" || (fact?.status || "") === "failed";
+        if (jobFailed) {
+          setValidationModal({
+            hits: limitedHits,
+            details:
+              status.message?.trim() ||
+              fact?.message?.trim() ||
+              "AI response could not be validated after retries.",
+          });
         }
-        setStatusLine(status.message?.trim() || "");
-        const aiStatus =
-          status.fact_ai_status === "passed" ||
-          status.fact_ai_status === "failed"
-            ? status.fact_ai_status
-            : null;
-        const claimsStatus =
-          status.fact_claims_status === "passed" ||
-          status.fact_claims_status === "failed"
-            ? status.fact_claims_status
-            : null;
-        setFactAiStatus(aiStatus);
-        setFactClaimsStatus(claimsStatus);
+      }
 
-        if (
-          !handled &&
-          status.status !== "running" &&
-          status.status !== "queued"
-        ) {
-          handled = true;
-          const fact = status.fact_check as FactCheckResult | undefined;
-          const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
+      const persistIds = shouldPersistMessages() ? [entry.chatId] : undefined;
+      applyChatUpdate(
+        (prev) =>
+          appendMessage(prev, entry.chatId, {
+            role: "assistant",
+            content: status.answer || "(no answer)",
+            hits: limitedHits,
+            diagnostics: status.diagnostics || {},
+            fact_check: fact,
+          }),
+        persistIds
+      );
 
-          if (status.status === "failed" && !status.message) {
-            setStatusLine("AI response could not be validated after retries.");
-          }
-
-          const jobFailed =
-            status.status === "failed" || (fact?.status || "") === "failed";
-          if (jobFailed) {
-            setValidationModal({
-              hits: limitedHits,
-              details:
-                status.message?.trim() ||
-                fact?.message?.trim() ||
-                "AI response could not be validated after retries.",
-            });
-          }
-
-          const targetChatId = jobChatRef.current || activeChat?.id;
-          if (targetChatId) {
-            const persistIds = shouldPersistMessages()
-              ? [targetChatId]
-              : undefined;
-            applyChatUpdate(
-              (prev) =>
-                appendMessage(prev, targetChatId, {
-                  role: "assistant",
-                  content: status.answer || "(no answer)",
-                  hits: limitedHits,
-                  diagnostics: status.diagnostics || {},
-                  fact_check: fact,
-                }),
-              persistIds
-            );
-          }
-          setDiag(status.diagnostics || {});
-          setPhase("done");
-          setJobId(null);
-          jobChatRef.current = null;
-          setTimeout(() => {
-            if (!cancelled) {
-              setPhase("idle");
-              setStatusLine("");
-            }
-          }, 600);
-        }
-      } catch (err: any) {
-        if (cancelled) return;
-        setStatusLine("Lost connection to validation job.");
+      if (entry.active) {
+        setDiag(status.diagnostics || {});
         setPhase("done");
         setJobId(null);
         jobChatRef.current = null;
         setTimeout(() => {
           if (!cancelled) {
             setPhase("idle");
+            setStatusLine("");
           }
         }, 600);
+      } else {
+        removeBackgroundJob(entry.jobId);
       }
     };
 
-    poll();
+    const pollJob = async (entry: {
+      jobId: string;
+      chatId: string;
+      active: boolean;
+    }) => {
+      try {
+        const status = await fetchQueryJob(entry.jobId);
+        if (cancelled) return;
+
+        lastJobFetchRef.current = Date.now();
+
+        if (entry.active) {
+          setPhase(phaseFromJob(status.phase));
+          if (typeof status.retry_count === "number") {
+            setRetryCount(status.retry_count);
+          }
+          if (typeof status.max_attempts === "number") {
+            setMaxRetries(status.max_attempts);
+          }
+          setStatusLine(status.message?.trim() || "");
+          const aiStatus =
+            status.fact_ai_status === "passed" ||
+            status.fact_ai_status === "failed"
+              ? status.fact_ai_status
+              : null;
+          const claimsStatus =
+            status.fact_claims_status === "passed" ||
+            status.fact_claims_status === "failed"
+              ? status.fact_claims_status
+              : null;
+          setFactAiStatus(aiStatus);
+          setFactClaimsStatus(claimsStatus);
+        }
+
+        if (status.status !== "running" && status.status !== "queued") {
+          handleCompletion(entry, status);
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        const fallbackMessage = "Lost connection to validation job.";
+        if (entry.active) {
+          setStatusLine(fallbackMessage);
+          setPhase("done");
+          setJobId(null);
+          jobChatRef.current = null;
+          setTimeout(() => {
+            if (!cancelled) {
+              setPhase("idle");
+            }
+          }, 600);
+        } else {
+          applyChatUpdate(
+            (prev) =>
+              appendMessage(prev, entry.chatId, {
+                role: "assistant",
+                content: fallbackMessage,
+              }),
+            [entry.chatId]
+          );
+          removeBackgroundJob(entry.jobId);
+        }
+      }
+    };
+
+    const poll = async () => {
+      await Promise.all(entries.map((entry) => pollJob(entry)));
+    };
+
+    void poll();
     const id = setInterval(poll, 900);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [jobId, activeChat?.id, setChats]);
+  }, [
+    jobId,
+    backgroundJobs,
+    activeChat?.id,
+    setChats,
+    applyChatUpdate,
+    removeBackgroundJob,
+    shouldPersistMessages,
+  ]);
 
   // open source
   async function openSourceByMeta(md: any) {
