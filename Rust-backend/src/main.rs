@@ -12,17 +12,17 @@ use crate::config::Settings;
 use crate::embedder::Embedder;
 use crate::jobs::JobManager;
 use crate::routes::{
-    get_source, health, list_lectures, llm_models, memorize, query, query_async,
+    get_source, health, insights, list_lectures, llm_models, memorize, query, query_async,
     query_async_status, quiz_grade, quiz_question, upload_lectures,
 };
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/upload/lectures", post(upload_lectures))
         .route("/memorize", post(memorize))
+        .route("/insights", post(insights))
         .route("/query", post(query))
         .route("/query/async", post(query_async))
         .route("/query/async/:job_id", get(query_async_status))
@@ -59,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/quiz/question", post(quiz_question))
         .route("/quiz/grade", post(quiz_grade))
         .with_state(app_state)
-        .layer(CorsLayer::permissive());
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http());
 
     let listener =
         tokio::net::TcpListener::bind((settings.bind_host.as_str(), settings.port)).await?;
@@ -80,7 +82,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         signal(SignalKind::terminate())
             .expect("failed to install signal handler")

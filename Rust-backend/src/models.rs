@@ -10,6 +10,9 @@ pub struct QueryOptions {
     pub force_lecture_key: Option<String>,
     pub use_global: bool,
     pub user_id: Option<String>,
+    pub chat_id: Option<String>,
+    pub chat_name: Option<String>,
+    pub user_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +25,57 @@ pub struct QueryRequest {
 pub struct MemorizeRequest {
     pub user_id: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InsightsRequest {
+    pub user_id: String,
+    pub max_chats: Option<usize>,
+    pub max_messages_per_chat: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct InsightConcept {
+    pub name: String,
+    pub rating: u8,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strengths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub weaknesses: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct InsightsPayload {
+    pub summary: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strengths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub weaknesses: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recommendations: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub concepts: Vec<InsightConcept>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct InsightStats {
+    pub chat_count: usize,
+    pub message_count: usize,
+    pub quiz_signals: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(default)]
+pub struct InsightsResponse {
+    #[serde(flatten)]
+    pub payload: InsightsPayload,
+    pub llm: LlmInfo,
+    pub stats: InsightStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -39,9 +93,24 @@ pub struct RetrieveHit {
     pub text: String,
     pub metadata: serde_json::Value,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     pub citation: Option<String>,
     pub file_url: Option<String>,
     pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ImageAsset {
+    pub img_url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub notes: Option<String>,
+    pub lecture_key: Option<String>,
+    pub area_description: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -50,6 +119,8 @@ pub struct RetrieveResult {
     pub diagnostics: RetrieveDiagnostics,
     pub hits: Vec<RetrieveHit>,
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_asset: Option<ImageAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -218,6 +289,8 @@ pub struct QueryResponse {
     pub llm_usage: LlmUsage,
     pub answer: Option<String>,
     pub fact_check: FactCheckResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_asset: Option<ImageAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +307,8 @@ pub struct QuizQuestion {
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuizQuestionRequest {
     pub lecture_key: Option<String>,
+    pub lecture_keys: Option<Vec<String>>,
+    pub question_index: Option<usize>,
     pub topic: Option<String>,
     pub question_type: Option<String>,
 }

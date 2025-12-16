@@ -5,23 +5,26 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::Row;
 use std::sync::Arc;
 use tokio::task;
-use tracing::error;
+use tracing::{error, warn};
+use uuid::Uuid;
 
 use crate::{
     config::Settings,
     db::DbPool,
     embedder::Embedder,
     ingest,
-    jobs::{JobManager, JobRecord},
-    llm::{self, FactCheckOutput},
+    jobs::{JobManager, JobMetadata, JobRecord},
+    llm::{self, FactCheckOutput, build_learning_insights},
     models::{
-        AsyncJobResponse, FactProgressCallback, FactProgressEvent, HealthResponse, MemorizeRequest,
-        QueryOptions, QueryRequest, QueryResponse, QuizGradeRequest, QuizGradeResponse,
-        QuizQuestionRequest, QuizQuestionResponse, RetrieveResult,
+        AsyncJobResponse, FactCheckResult, FactProgressCallback, FactProgressEvent, HealthResponse,
+        ImageAsset, InsightStats, InsightsRequest, InsightsResponse, MemorizeRequest, QueryOptions,
+        QueryRequest, QueryResponse, QuizGradeRequest, QuizGradeResponse, QuizQuestionRequest,
+        QuizQuestionResponse, RetrieveDiagnostics, RetrieveHit, RetrieveResult,
     },
     retrieve,
 };
@@ -80,6 +83,75 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+fn build_annotated_image_block(asset: &ImageAsset) -> Option<String> {
+    let payload = json!({
+        "img_url": asset.img_url,
+        "title": asset.title.clone().unwrap_or_default(),
+        "description": asset.description.clone().unwrap_or_default(),
+        "lecture": asset.lecture_key.clone().unwrap_or_default(),
+        "notes": asset.notes.clone().unwrap_or_default(),
+        "area_description": asset.area_description.clone(),
+    });
+    serde_json::to_string_pretty(&payload)
+        .ok()
+        .map(|body| format!("```annotated-image\n{}\n```", body))
+}
+
+fn answer_with_image_fallback(
+    answer: &Option<String>,
+    asset: Option<&ImageAsset>,
+) -> Option<String> {
+    let existing = answer.clone();
+    let Some(asset_block) = asset.and_then(build_annotated_image_block) else {
+        return existing;
+    };
+    match existing {
+        Some(text) if text.contains("```annotated-image") => Some(text),
+        Some(text) => Some(format!("{}\n\n{}", text.trim_end(), asset_block)),
+        None => Some(asset_block),
+    }
+}
+
+async fn load_user_context(pool: &DbPool, options: &QueryOptions) -> Option<String> {
+    if let Some(raw) = options.user_context.as_ref().and_then(|ctx| {
+        let trimmed = ctx.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }) {
+        return Some(raw);
+    }
+
+    let Some(user_id) = options.user_id.as_deref() else {
+        return None;
+    };
+
+    let user_uuid = match Uuid::parse_str(user_id) {
+        Ok(id) => id,
+        Err(error) => {
+            warn!(%user_id, %error, "invalid user_id for profile context");
+            return None;
+        }
+    };
+
+    match sqlx::query("SELECT context FROM user_profiles WHERE id=$1")
+        .bind(user_uuid)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(row)) => {
+            let value: Option<String> = row.get("context");
+            value.and_then(|ctx| {
+                let trimmed = ctx.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        }
+        Ok(None) => None,
+        Err(error) => {
+            warn!(%user_id, %error, "failed to load profile context");
+            None
+        }
+    }
+}
+
 pub async fn upload_lectures(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -104,9 +176,11 @@ pub async fn memorize(
     State(state): State<AppState>,
     Json(payload): Json<MemorizeRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let user_uuid = uuid::Uuid::parse_str(&payload.user_id)
+        .map_err(|e| anyhow::anyhow!("invalid user_id UUID: {}", e))?;
     let interaction_id: i64 =
         sqlx::query("INSERT INTO user_interactions(user_id, q_text) VALUES ($1,$2) RETURNING id")
-            .bind(&payload.user_id)
+            .bind(user_uuid)
             .bind(&payload.text)
             .fetch_one(&state.pool)
             .await?
@@ -114,7 +188,7 @@ pub async fn memorize(
     let embeddings = state.embedder.embed([payload.text.as_str()]).await?;
     let vector = pgvector::Vector::from(embeddings[0].clone());
     sqlx::query("INSERT INTO chunks (store_kind, tenant_id, doc_id, chunk_index, text, embedding, metadata) VALUES (3,$1,NULL,0,$2,$3,$4)")
-        .bind(&payload.user_id)
+        .bind(user_uuid)
         .bind(&payload.text)
         .bind(vector)
         .bind(json!({"source": "user_note", "interaction_id": interaction_id}))
@@ -123,17 +197,94 @@ pub async fn memorize(
     Ok(Json(json!({"ok": true})))
 }
 
+pub async fn insights(
+    State(state): State<AppState>,
+    Json(payload): Json<InsightsRequest>,
+) -> Result<Json<InsightsResponse>, ApiError> {
+    let user_uuid = uuid::Uuid::parse_str(&payload.user_id)
+        .map_err(|e| anyhow::anyhow!("invalid user_id UUID: {}", e))?;
+    let max_chats = payload.max_chats.unwrap_or(6).clamp(1, 20);
+    let max_messages = payload.max_messages_per_chat.unwrap_or(12).clamp(1, 50);
+
+    let rows = sqlx::query(
+        "SELECT name, messages FROM user_chats WHERE user_id=$1 ORDER BY updated_at DESC LIMIT $2",
+    )
+    .bind(user_uuid)
+    .bind(max_chats as i64)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut transcript = String::new();
+    let mut chat_count = 0usize;
+    let mut message_count = 0usize;
+    let mut quiz_signals = 0usize;
+
+    for row in rows {
+        let chat_name: String = row.get("name");
+        let raw_messages: Value = row.get("messages");
+        let Some(messages) = raw_messages.as_array() else {
+            continue;
+        };
+        let mut window: Vec<Value> = messages.iter().rev().take(max_messages).cloned().collect();
+        window.reverse();
+        if window.is_empty() {
+            continue;
+        }
+        chat_count += 1;
+        transcript.push_str(&format!("Chat: {}\n", chat_name));
+        for msg in window {
+            let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
+            if content.trim().is_empty() {
+                continue;
+            }
+            let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
+            transcript.push_str(&format!("- {}: {}\n", role, content.trim()));
+            message_count += 1;
+
+            let kind = msg.get("kind").and_then(Value::as_str).unwrap_or("");
+            let lowered = content.to_ascii_lowercase();
+            if kind == "quiz"
+                || lowered.contains("quiz question")
+                || lowered.contains("quiz:")
+                || lowered.contains("quiz me")
+            {
+                quiz_signals += 1;
+            }
+        }
+        transcript.push('\n');
+    }
+
+    let (payload, llm) = build_learning_insights(&state.settings, &transcript).await?;
+
+    Ok(Json(InsightsResponse {
+        payload,
+        llm,
+        stats: InsightStats {
+            chat_count,
+            message_count,
+            quiz_signals,
+        },
+    }))
+}
+
 pub async fn query(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let options = payload.options.unwrap_or(QueryOptions {
+    let options = payload.options.clone().unwrap_or(QueryOptions {
         force_lecture_key: None,
         use_global: true,
         user_id: None,
+        chat_id: None,
+        chat_name: None,
+        user_context: None,
     });
+    let user_context = load_user_context(&state.pool, &options).await;
     let RetrieveResult {
-        diagnostics, hits, ..
+        diagnostics,
+        hits,
+        image_asset,
+        ..
     } = retrieve::retrieve(
         &state.pool,
         &state.embedder,
@@ -143,7 +294,10 @@ pub async fn query(
         options.user_id.as_deref(),
     )
     .await?;
-    let context = retrieve::build_context(&hits);
+    let mut context = retrieve::build_context_with_image(&hits, image_asset.as_ref());
+    if let Some(extra) = user_context.as_deref() {
+        context = format!("User context:\n{}\n\n{}", extra, context);
+    }
     let FactCheckOutput {
         answer,
         fact_check,
@@ -156,6 +310,7 @@ pub async fn query(
         None,
     )
     .await?;
+    let final_answer = answer_with_image_fallback(&answer, image_asset.as_ref());
     let response = QueryResponse {
         diagnostics,
         top_k: hits.len(),
@@ -164,8 +319,9 @@ pub async fn query(
         llm_model: llm.model.clone(),
         llm_latency_s: llm.latency_s,
         llm_usage: llm.usage.clone(),
-        answer,
+        answer: final_answer,
         fact_check,
+        image_asset,
     };
     Ok(Json(response))
 }
@@ -174,7 +330,27 @@ pub async fn query_async(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<AsyncJobResponse>, ApiError> {
-    let job_id = state.jobs.create_job(None);
+    let metadata = JobMetadata {
+        user_id: payload
+            .options
+            .as_ref()
+            .and_then(|opts| opts.user_id.clone()),
+        chat_id: payload
+            .options
+            .as_ref()
+            .and_then(|opts| opts.chat_id.clone()),
+        chat_name: payload
+            .options
+            .as_ref()
+            .and_then(|opts| opts.chat_name.clone()),
+        user_context: payload
+            .options
+            .as_ref()
+            .and_then(|opts| opts.user_context.clone()),
+        query: Some(payload.query.clone()),
+        last_fetch: None,
+    };
+    let job_id = state.jobs.create_job(Some(metadata));
     let job_id_for_task = job_id.clone();
     let state_clone = state.clone();
     task::spawn(async move {
@@ -189,11 +365,15 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
     state
         .jobs
         .update_job(&job_id, json!({"status": "running", "phase": "retrieving"}));
-    let options = payload.options.unwrap_or(QueryOptions {
+    let options = payload.options.clone().unwrap_or(QueryOptions {
         force_lecture_key: None,
         use_global: true,
         user_id: None,
+        chat_id: None,
+        chat_name: None,
+        user_context: None,
     });
+    let user_context = load_user_context(&state.pool, &options).await;
     let result = retrieve::retrieve(
         &state.pool,
         &state.embedder,
@@ -214,10 +394,29 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
                     "message": format!("Retrieval failed: {}", err),
                 }),
             );
+            if let Some(job) = state.jobs.get_job(&job_id) {
+                let empty_diag = RetrieveDiagnostics::default();
+                let empty_fact = FactCheckResult::default();
+                persist_chat_if_stale(
+                    &state.pool,
+                    &job,
+                    &payload,
+                    &Some(format!("Retrieval failed: {}", err)),
+                    &empty_diag,
+                    &[],
+                    &empty_fact,
+                )
+                .await
+                .ok();
+            }
             return Ok(());
         }
     };
-    let context = retrieve::build_context(&retrieval.hits);
+    let mut context =
+        retrieve::build_context_with_image(&retrieval.hits, retrieval.image_asset.as_ref());
+    if let Some(extra) = user_context.as_deref() {
+        context = format!("User context:\n{}\n\n{}", extra, context);
+    }
     state.jobs.update_job(
         &job_id,
         json!({
@@ -226,6 +425,7 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             "hits": serde_json::to_value(&retrieval.hits).unwrap_or(json!([])),
             "top_k": retrieval.hits.len(),
             "context_len": context.len(),
+            "image_asset": serde_json::to_value(&retrieval.image_asset).unwrap_or(json!(null)),
         }),
     );
     let jobs_for_progress = state.jobs.clone();
@@ -323,16 +523,31 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             fact_check,
             llm,
         }) => {
+            let final_answer = answer_with_image_fallback(&answer, retrieval.image_asset.as_ref());
             state.jobs.update_job(
                 &job_id,
                 json!({
                     "status": "succeeded",
                     "phase": "done",
-                    "answer": answer,
-                    "fact_check": serde_json::to_value(fact_check).unwrap_or(json!({})),
+                    "answer": final_answer,
+                    "fact_check": serde_json::to_value(&fact_check).unwrap_or(json!({})),
                     "llm": serde_json::to_value(llm).unwrap_or(json!({})),
+                    "image_asset": serde_json::to_value(&retrieval.image_asset).unwrap_or(json!(null)),
                 }),
             );
+            if let Some(job) = state.jobs.get_job(&job_id) {
+                persist_chat_if_stale(
+                    &state.pool,
+                    &job,
+                    &payload,
+                    &final_answer,
+                    &retrieval.diagnostics,
+                    &retrieval.hits,
+                    &fact_check,
+                )
+                .await
+                .ok();
+            }
         }
         Err(err) => {
             state.jobs.update_job(
@@ -343,6 +558,20 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
                     "message": format!("LLM pipeline failed: {}", err),
                 }),
             );
+            if let Some(job) = state.jobs.get_job(&job_id) {
+                let empty_fact = FactCheckResult::default();
+                persist_chat_if_stale(
+                    &state.pool,
+                    &job,
+                    &payload,
+                    &Some(format!("LLM pipeline failed: {}", err)),
+                    &retrieval.diagnostics,
+                    &retrieval.hits,
+                    &empty_fact,
+                )
+                .await
+                .ok();
+            }
         }
     }
 
@@ -356,7 +585,78 @@ pub async fn query_async_status(
     let Some(job) = state.jobs.get_job(&job_id) else {
         return Err(ApiError(anyhow::anyhow!("job not found")));
     };
+    state.jobs.touch_fetch(&job_id);
     Ok(Json(job))
+}
+
+fn should_backend_persist(job: &JobRecord) -> bool {
+    job.metadata
+        .last_fetch
+        .map(|ts| Utc::now().signed_duration_since(ts) > chrono::Duration::seconds(30))
+        .unwrap_or(true)
+}
+
+async fn persist_chat_if_stale(
+    pool: &DbPool,
+    job: &JobRecord,
+    payload: &QueryRequest,
+    answer: &Option<String>,
+    diagnostics: &RetrieveDiagnostics,
+    hits: &[RetrieveHit],
+    fact_check: &FactCheckResult,
+) -> Result<()> {
+    if !should_backend_persist(job) {
+        return Ok(());
+    }
+
+    let user_id = match job.metadata.user_id.as_ref() {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+    let chat_id = match job.metadata.chat_id.as_ref() {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+    let chat_name = job
+        .metadata
+        .chat_name
+        .clone()
+        .unwrap_or_else(|| "Chat".to_string());
+
+    let limited_hits: Vec<Value> = hits
+        .iter()
+        .take(3)
+        .filter_map(|h| serde_json::to_value(h).ok())
+        .collect();
+    let fact_check_json = serde_json::to_value(fact_check).unwrap_or(json!({}));
+    let diag_json = serde_json::to_value(diagnostics).unwrap_or(json!({}));
+    let messages = json!([
+        {"role": "user", "content": payload.query.clone()},
+        {
+            "role": "assistant",
+            "content": answer.clone().unwrap_or_else(|| "(no answer)".to_string()),
+            "hits": limited_hits,
+            "diagnostics": diag_json,
+            "fact_check": fact_check_json,
+        }
+    ]);
+
+    sqlx::query(
+        "INSERT INTO user_chats (id, user_id, name, messages)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
+           messages = coalesce(user_chats.messages, '[]'::jsonb) || EXCLUDED.messages,
+           updated_at = now()",
+    )
+    .bind(chat_id)
+    .bind(user_id)
+    .bind(chat_name)
+    .bind(messages)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 pub async fn llm_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -420,7 +720,13 @@ pub async fn quiz_question(
     State(state): State<AppState>,
     Json(payload): Json<QuizQuestionRequest>,
 ) -> Result<Json<QuizQuestionResponse>, ApiError> {
-    if payload.topic.is_none() && payload.lecture_key.is_none() {
+    let has_lecture_selection = payload.lecture_key.is_some()
+        || payload
+            .lecture_keys
+            .as_ref()
+            .map(|keys| keys.iter().any(|k| !k.trim().is_empty()))
+            .unwrap_or(false);
+    if payload.topic.is_none() && !has_lecture_selection {
         return Err(ApiError(anyhow::anyhow!("Provide a topic or lecture key")));
     }
     let mut question_type = payload
@@ -431,32 +737,60 @@ pub async fn quiz_question(
     if !allowed.contains(&question_type.as_str()) {
         question_type = "short_answer".to_string();
     }
+    let mut lecture_cycle: Vec<String> = payload
+        .lecture_keys
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|k| !k.trim().is_empty())
+        .collect();
+    if lecture_cycle.is_empty() {
+        if let Some(single) = payload.lecture_key.clone() {
+            if !single.trim().is_empty() {
+                lecture_cycle.push(single);
+            }
+        }
+    }
+    let wants_all = lecture_cycle
+        .iter()
+        .any(|key| key.eq_ignore_ascii_case("all"));
+    let lecture_for_question = if wants_all || lecture_cycle.is_empty() {
+        None
+    } else {
+        let index = payload.question_index.unwrap_or(0);
+        let idx = index % lecture_cycle.len();
+        lecture_cycle.get(idx).cloned()
+    };
     let query = payload
         .topic
         .clone()
         .or_else(|| {
-            payload
-                .lecture_key
+            lecture_for_question
                 .clone()
+                .or(payload.lecture_key.clone())
                 .map(|k| format!("Key ideas from {}", k))
         })
         .unwrap_or_else(|| "Key ideas from the course".to_string());
-    let retrieval = retrieve::retrieve(
+    let priority_hits = retrieve::retrieve_priority_hits(
         &state.pool,
         &state.embedder,
         &query,
-        payload.lecture_key.as_deref(),
-        payload.lecture_key.is_none(),
-        None,
+        lecture_for_question.as_deref(),
+        20,
     )
     .await?;
-    let context = retrieve::build_context(&retrieval.hits);
+    if priority_hits.is_empty() {
+        return Err(ApiError(anyhow::anyhow!(
+            "No priority 1 documents available for quizzes"
+        )));
+    }
+    let context = retrieve::build_context(&priority_hits);
     let question =
         llm::generate_quiz_item(&state.settings, &context, &query, &question_type).await?;
     Ok(Json(QuizQuestionResponse {
         question,
         context,
-        lecture_key: payload.lecture_key.clone(),
+        lecture_key: lecture_for_question,
         topic: payload.topic.clone(),
     }))
 }

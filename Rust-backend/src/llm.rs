@@ -12,8 +12,8 @@ use crate::{
     embedder::SentenceEmbedder,
     models::{
         ClaimCheckClaim, ClaimCheckResult, FactAiCheck, FactCheckAttempt, FactCheckResult,
-        FactProgressCallback, FactProgressEvent, LlmInfo, LlmUsage, QuizGradeResponse,
-        QuizQuestion,
+        FactProgressCallback, FactProgressEvent, InsightsPayload, LlmInfo, LlmUsage,
+        QuizGradeResponse, QuizQuestion,
     },
 };
 
@@ -327,6 +327,8 @@ async fn answer_with_context(
         .to_string()
         + " Cite evidence inline using the original citation markers such as [Lecture X Slide Y]."
         + " If the context is insufficient, say so explicitly."
+        + " Don't cite after every sentence, at the end for a whole chunk is fine."
+        + " Use Markdown formatting as appropriate. Bullet points are encouraged for lists."
         + " When the context includes lecture image metadata (IMG_URL, TITLE, DESCRIPTION, NOTES, LECTURE, AREA_DESCRIPTION) you may embed a visual reference.";
     system.push_str(
         "\nTo embed an annotated image, emit a fenced code block labelled annotated-image that contains JSON like:\n"
@@ -650,7 +652,7 @@ async fn claim_check<E: SentenceEmbedder>(
             coverage * 100.0,
             COVERAGE_MIN * 100.0,
             score * 100.0,
-            threshold * 100.0
+            threshold
         ))
     };
 
@@ -1210,4 +1212,48 @@ pub async fn grade_quiz_answer(
     let payload = json_from_response(&raw)?;
     let grade = serde_json::from_value(payload)?;
     Ok(grade)
+}
+
+pub async fn build_learning_insights(
+    settings: &Settings,
+    transcript: &str,
+) -> Result<(InsightsPayload, LlmInfo)> {
+    let safe_transcript = transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if safe_transcript.is_empty() {
+        return Ok((
+            InsightsPayload {
+                summary: "I could not find any learning interactions yet. Start a chat or quiz and I will synthesize insights here.".to_string(),
+                ..Default::default()
+            },
+            LlmInfo::default(),
+        ));
+    }
+
+    let system = "You are a futuristic mentor distilling a learner's interactions into concise insights. Respond in terse JSON for UI consumption.";
+    let user_prompt = format!(
+        "Based on all my learning interactions, what are my insights, what are my strengths, what are my weaknesses, any general comments.\n\nLearning interactions (latest first):\n{}\n\nReturn valid JSON with keys: summary (2 sentences), strengths (array of 3-5 bullets), weaknesses (array of 3-5 bullets), recommendations (array of 3-6 specific actions), concepts (array of at least 5 objects with name, rating (0-100), strengths (array), weaknesses (array), actions (array)). Avoid markdown and avoid code fences.",
+        safe_transcript
+    );
+
+    let messages = vec![
+        json!({"role": "system", "content": system}),
+        json!({"role": "user", "content": user_prompt}),
+    ];
+
+    let (content, llm) = call_sig_gpt5(settings, &messages).await?;
+    let parsed = json_from_response(&content)
+        .ok()
+        .and_then(|value| serde_json::from_value::<InsightsPayload>(value).ok())
+        .unwrap_or_else(|| InsightsPayload {
+            summary: content.trim().to_string(),
+            ..Default::default()
+        });
+
+    Ok((parsed, llm))
 }

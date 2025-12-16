@@ -3,12 +3,12 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use lazy_static::lazy_static;
 use pgvector::Vector;
 use regex::Regex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sqlx::Row;
 
 use crate::{db::DbPool, embedder::Embedder};
@@ -143,7 +143,7 @@ async fn insert_chunks(pool: &DbPool, rows: &[PreparedChunk]) -> Result<()> {
         return Ok(());
     }
     let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO chunks (store_kind, tenant_id, doc_id, chunk_index, text, embedding, metadata)"
+        "INSERT INTO chunks (store_kind, tenant_id, doc_id, chunk_index, text, embedding, metadata)",
     );
     builder.push(" VALUES ");
     let mut separated = builder.separated(", ");

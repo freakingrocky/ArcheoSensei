@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 
+use serde_json::{Value, json};
+
 use anyhow::Context;
 use pgvector::Vector;
-use serde_json::json;
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
     db::DbPool,
     embedder::Embedder,
-    models::{RetrieveDiagnostics, RetrieveHit, RetrieveResult},
+    models::{ImageAsset, RetrieveDiagnostics, RetrieveHit, RetrieveResult},
 };
+use tracing::{info, warn};
 
 async fn knn_store(
     pool: &DbPool,
@@ -19,7 +21,7 @@ async fn knn_store(
     limit: i64,
 ) -> anyhow::Result<Vec<RetrieveHit>> {
     let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
-                      d.\"Citation\", d.\"FILE_URL\" \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
                FROM chunks c \
                LEFT JOIN documents d ON d.id = c.doc_id \
                WHERE c.store_kind = $2 \
@@ -41,10 +43,55 @@ async fn knn_lecture(
     limit: i64,
 ) -> anyhow::Result<Vec<RetrieveHit>> {
     let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
-                      d.\"Citation\", d.\"FILE_URL\" \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
                FROM chunks c \
                LEFT JOIN documents d ON d.id = c.doc_id \
                WHERE c.store_kind = 2 AND c.metadata->>'lecture_key' = $2 \
+               ORDER BY c.embedding <=> $1::vector \
+               LIMIT $3";
+    let rows: Vec<PgRow> = sqlx::query(sql)
+        .bind(qvec.clone())
+        .bind(lecture_key)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(row_to_hit).collect())
+}
+
+async fn knn_store_priority(
+    pool: &DbPool,
+    qvec: &Vector,
+    store_kind: i32,
+    limit: i64,
+) -> anyhow::Result<Vec<RetrieveHit>> {
+    let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
+               FROM chunks c \
+               LEFT JOIN documents d ON d.id = c.doc_id \
+               WHERE c.store_kind = $2 AND COALESCE((d.extra->>'priority')::int, 0) = 1 \
+               ORDER BY c.embedding <=> $1::vector \
+               LIMIT $3";
+    let rows: Vec<PgRow> = sqlx::query(sql)
+        .bind(qvec.clone())
+        .bind(store_kind)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(row_to_hit).collect())
+}
+
+async fn knn_lecture_priority(
+    pool: &DbPool,
+    qvec: &Vector,
+    lecture_key: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<RetrieveHit>> {
+    let sql = "SELECT c.id, c.text, c.metadata, 1 - (c.embedding <=> $1::vector) AS score, \
+                      d.\"Citation\", d.\"FILE_URL\", (d.extra->>'priority')::int AS priority \
+               FROM chunks c \
+               LEFT JOIN documents d ON d.id = c.doc_id \
+               WHERE c.store_kind = 2 AND c.metadata->>'lecture_key' = $2 \
+                 AND COALESCE((d.extra->>'priority')::int, 0) = 1 \
                ORDER BY c.embedding <=> $1::vector \
                LIMIT $3";
     let rows: Vec<PgRow> = sqlx::query(sql)
@@ -62,10 +109,21 @@ fn row_to_hit(row: PgRow) -> RetrieveHit {
         text: row.get::<String, _>("text"),
         metadata: row.get::<serde_json::Value, _>("metadata"),
         score: row.get::<f64, _>("score") as f32,
+        priority: row.try_get::<Option<i32>, _>("priority").ok().flatten(),
         citation: row.try_get::<Option<String>, _>("Citation").ok().flatten(),
         file_url: row.try_get::<Option<String>, _>("FILE_URL").ok().flatten(),
         tag: None,
     }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }
 
 fn detect_lecture(candidates: &[RetrieveHit]) -> Option<(String, HashMap<String, f32>)> {
@@ -188,6 +246,124 @@ fn build_context_from_hits(hits: &[RetrieveHit]) -> String {
     blocks.join("\n\n")
 }
 
+fn serialize_area_description(area: &Value) -> String {
+    serde_json::to_string(area).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn build_image_context(asset: &ImageAsset) -> String {
+    let mut lines = Vec::new();
+    lines.push("IMAGE_ASSET".to_string());
+    lines.push(format!("IMG_URL: {}", asset.img_url));
+    if let Some(title) = asset.title.as_deref() {
+        if !title.trim().is_empty() {
+            lines.push(format!("TITLE: {}", title.trim()));
+        }
+    }
+    if let Some(desc) = asset.description.as_deref() {
+        if !desc.trim().is_empty() {
+            lines.push(format!("DESCRIPTION: {}", desc.trim()));
+        }
+    }
+    if let Some(notes) = asset.notes.as_deref() {
+        if !notes.trim().is_empty() {
+            lines.push(format!("NOTES: {}", notes.trim()));
+        }
+    }
+    if let Some(lecture) = asset.lecture_key.as_deref() {
+        if !lecture.trim().is_empty() {
+            lines.push(format!("LECTURE: {}", lecture.trim()));
+        }
+    }
+    lines.push(format!(
+        "AREA_DESCRIPTION: {}",
+        serialize_area_description(&asset.area_description)
+    ));
+    lines.join("\n")
+}
+
+async fn fetch_image_assets(
+    pool: &DbPool,
+    lecture_key: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<ImageAsset>> {
+    let rows: Vec<PgRow> = match lecture_key {
+        Some(key) => sqlx::query(
+            "SELECT img_url, title, description, notes, lecture_key, COALESCE(area_description, '[]'::jsonb) as area_description \n             FROM lecture_image_assets WHERE lecture_key = $1 ORDER BY updated_at DESC LIMIT $2",
+        )
+        .bind(key)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?,
+        None => sqlx::query(
+            "SELECT img_url, title, description, notes, lecture_key, COALESCE(area_description, '[]'::jsonb) as area_description \n             FROM lecture_image_assets ORDER BY updated_at DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?,
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ImageAsset {
+            img_url: row.get::<String, _>("img_url"),
+            title: row.try_get::<String, _>("title").ok(),
+            description: row.try_get::<String, _>("description").ok(),
+            notes: row.try_get::<String, _>("notes").ok(),
+            lecture_key: row.try_get::<String, _>("lecture_key").ok(),
+            area_description: row
+                .try_get::<Value, _>("area_description")
+                .unwrap_or_else(|_| json!([])),
+            similarity: None,
+        })
+        .collect())
+}
+
+async fn select_best_image_asset(
+    pool: &DbPool,
+    embedder: &Embedder,
+    query_embedding: &[f32],
+    query: &str,
+    lecture_hint: Option<&str>,
+) -> anyhow::Result<Option<ImageAsset>> {
+    let mut candidates = fetch_image_assets(pool, lecture_hint, 32).await?;
+    if candidates.is_empty() {
+        candidates = fetch_image_assets(pool, None, 24).await?;
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let embed_inputs: Vec<String> = candidates
+        .iter()
+        .map(|c| {
+            format!(
+                "{}\n{}\n{}\n{}\nQuery: {}",
+                c.title.clone().unwrap_or_default(),
+                c.description.clone().unwrap_or_default(),
+                c.notes.clone().unwrap_or_default(),
+                c.lecture_key.clone().unwrap_or_default(),
+                query
+            )
+        })
+        .collect();
+    let embeddings = embedder
+        .embed(embed_inputs.iter().map(|s| s.as_str()))
+        .await?;
+
+    let mut best: Option<ImageAsset> = None;
+    let mut best_score = f32::MIN;
+    for (mut asset, emb) in candidates.into_iter().zip(embeddings) {
+        let sim = cosine_similarity(query_embedding, &emb);
+        asset.similarity = Some(sim);
+        if sim > best_score {
+            best_score = sim;
+            best = Some(asset);
+        }
+    }
+
+    Ok(best)
+}
+
 pub async fn retrieve(
     pool: &DbPool,
     embedder: &Embedder,
@@ -197,10 +373,18 @@ pub async fn retrieve(
     user_id: Option<&str>,
 ) -> anyhow::Result<RetrieveResult> {
     let embeddings = embedder.embed([query]).await?;
-    let qvec = Vector::from(embeddings.into_iter().next().context("missing embedding")?);
+    let query_embedding = embeddings.into_iter().next().context("missing embedding")?;
+    let qvec = Vector::from(query_embedding.clone());
 
     let mut diagnostics = RetrieveDiagnostics::default();
     let mut merged: Vec<RetrieveHit> = Vec::new();
+
+    info!(
+        lecture_force = ?lecture_force,
+        use_global,
+        user_id_present = user_id.is_some(),
+        "starting retrieval"
+    );
 
     let lecture_hits = if let Some(force) = lecture_force {
         diagnostics.lecture_forced = Some(force.to_string());
@@ -253,13 +437,17 @@ pub async fn retrieve(
     }
 
     if let Some(user_id) = user_id {
+        let user_uuid = Uuid::parse_str(user_id).map_err(|error| {
+            warn!(%user_id, %error, "failed to parse user_id as UUID");
+            anyhow::anyhow!("invalid user_id UUID")
+        })?;
         let sql = "SELECT id, text, metadata, 1 - (embedding <=> $1::vector) AS score \
                    FROM chunks \
-                   WHERE store_kind = 3 AND tenant_id = $2 \
+                   WHERE store_kind = 3 AND tenant_id = $2::uuid \
                    ORDER BY embedding <=> $1::vector LIMIT 10";
         let rows: Vec<PgRow> = sqlx::query(sql)
             .bind(qvec.clone())
-            .bind(user_id)
+            .bind(user_uuid)
             .fetch_all(pool)
             .await?;
         for row in rows {
@@ -268,6 +456,7 @@ pub async fn retrieve(
                 text: row.get("text"),
                 metadata: row.get("metadata"),
                 score: row.get::<f64, _>("score") as f32,
+                priority: None,
                 citation: None,
                 file_url: None,
                 tag: None,
@@ -277,11 +466,21 @@ pub async fn retrieve(
         }
     }
 
-    merged.sort_by(|a, b| b.score.total_cmp(&a.score));
+    merged.sort_by(|a, b| {
+        let pa = a.priority.unwrap_or(i32::MAX);
+        let pb = b.priority.unwrap_or(i32::MAX);
+        pa.cmp(&pb).then_with(|| b.score.total_cmp(&a.score))
+    });
     let mut hits = merged;
     if hits.len() > 12 {
         hits.truncate(12);
     }
+
+    info!(
+        hit_count = hits.len(),
+        top_score = hits.first().map(|h| h.score),
+        "retrieval completed"
+    );
 
     let label = hits.first().and_then(|hit| {
         hit.citation
@@ -289,15 +488,48 @@ pub async fn retrieve(
             .or_else(|| readable_label(&hit.metadata))
     });
 
+    let lecture_hint = lecture_force.or(diagnostics.lecture_detected.as_deref());
+    let image_asset =
+        select_best_image_asset(pool, embedder, &query_embedding, query, lecture_hint).await?;
+
     Ok(RetrieveResult {
         diagnostics,
         hits,
         label,
+        image_asset,
     })
 }
 
 pub fn build_context(hits: &[RetrieveHit]) -> String {
     build_context_from_hits(hits)
+}
+
+pub fn build_context_with_image(hits: &[RetrieveHit], image: Option<&ImageAsset>) -> String {
+    let mut context = build_context_from_hits(hits);
+    if let Some(asset) = image {
+        let image_block = build_image_context(asset);
+        if !context.is_empty() {
+            context.push_str("\n\n");
+        }
+        context.push_str(&image_block);
+    }
+    context
+}
+
+pub async fn retrieve_priority_hits(
+    pool: &DbPool,
+    embedder: &Embedder,
+    query: &str,
+    lecture_key: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<RetrieveHit>> {
+    let embeddings = embedder.embed([query]).await?;
+    let qvec = Vector::from(embeddings.into_iter().next().context("missing embedding")?);
+    if let Some(key) = lecture_key {
+        knn_lecture_priority(pool, &qvec, key, limit).await
+    } else {
+        knn_store_priority(pool, &qvec, 2, limit).await
+    }
 }
 
 #[cfg(test)]
@@ -319,6 +551,7 @@ mod tests {
             text: "example text".to_string(),
             metadata: json!({"lecture_key": "lec_1", "slide_no": 1}),
             score: 0.9,
+            priority: None,
             citation: Some("[Lecture 1 Slide 1]".to_string()),
             file_url: None,
             tag: None,

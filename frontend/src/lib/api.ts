@@ -42,6 +42,17 @@ export type QueryJobStatus = {
   llm?: any;
   fact_ai_status?: "passed" | "failed";
   fact_claims_status?: "passed" | "failed";
+  image_asset?: ImageAsset | null;
+};
+
+export type ImageAsset = {
+  img_url: string;
+  title?: string | null;
+  description?: string | null;
+  notes?: string | null;
+  lecture_key?: string | null;
+  area_description?: any;
+  similarity?: number | null;
 };
 
 export async function fetchQueryJob(jobId: string): Promise<QueryJobStatus> {
@@ -92,6 +103,32 @@ export type QuizGradeResponse = {
   bad_points: string[];
 };
 
+export type InsightConcept = {
+  name: string;
+  rating: number;
+  strengths?: string[];
+  weaknesses?: string[];
+  actions?: string[];
+};
+
+export type InsightsResponse = {
+  summary: string;
+  strengths: string[];
+  weaknesses: string[];
+  recommendations: string[];
+  concepts: InsightConcept[];
+  llm: {
+    model?: string | null;
+    latency_s?: number | null;
+    usage?: any;
+  };
+  stats: {
+    chat_count: number;
+    message_count: number;
+    quiz_signals: number;
+  };
+};
+
 export async function requestQuizQuestion(payload: {
   lecture_key?: string;
   topic?: string;
@@ -124,6 +161,26 @@ export async function gradeQuizAnswer(payload: {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Quiz grading error ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+export async function fetchInsights(
+  payload: {
+    user_id: string;
+    max_chats?: number;
+    max_messages_per_chat?: number;
+  } = { user_id: "" }
+): Promise<InsightsResponse> {
+  const res = await fetch(`${backendBase()}/insights`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Insights error ${res.status}: ${text}`);
   }
   return res.json();
 }

@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
 import {
-  fetchLectures,
-  LectureItem,
   startQueryJob,
   fetchQueryJob,
   requestQuizQuestion,
@@ -14,21 +19,32 @@ import {
   QuizQuestionPayload,
   QuizGradeResponse,
   QuizQuestionType,
+  QueryJobStatus,
+  fetchInsights,
+  type InsightsResponse,
+  type InsightConcept,
+  type ImageAsset,
 } from "@/lib/api";
 import {
   Chat,
   Msg,
   Hit,
   FactCheckResult,
-  loadChats,
-  saveChats,
-  loadActiveChatId,
-  saveActiveChatId,
   createChat,
   appendMessage,
   renameChat,
   deleteChat,
+  fetchUserChats,
+  upsertUserChat,
+  deleteUserChat,
 } from "@/lib/chat";
+import { AuthGate } from "@/components/AuthGate";
+import {
+  updateActiveChatId,
+  updateUserContext,
+  type UserProfile,
+} from "@/lib/profile";
+import type { User } from "@supabase/supabase-js";
 
 // ------- constants / helpers -------
 type Phase =
@@ -43,8 +59,8 @@ type Phase =
 type QuizStage = "config" | "question";
 
 type QuizConfig = {
-  lecture_key: string;
   topic: string;
+  lecture_key?: string | null;
 };
 
 type QuizAttempt = {
@@ -191,6 +207,100 @@ const LOADING_LINES = [
   "Just a second, truly a confounding question…",
 ];
 
+function clampRating(value?: number | null) {
+  if (!Number.isFinite(value || 0)) return 0;
+  return Math.max(0, Math.min(100, Number(value)));
+}
+
+function SkillRadar({ concepts }: { concepts: InsightConcept[] }) {
+  const filtered = concepts.filter((c) => c.name && Number.isFinite(c.rating));
+  if (!filtered.length) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-neutral-800 bg-neutral-950/70 px-4 py-8 text-sm text-neutral-400">
+        No concept ratings yet. Run a few chats or quizzes first.
+      </div>
+    );
+  }
+
+  const cx = 120;
+  const cy = 120;
+  const radius = 100;
+  const step = (Math.PI * 2) / filtered.length;
+
+  const polygonPoints = filtered
+    .map((concept, idx) => {
+      const pct = clampRating(concept.rating) / 100;
+      const r = pct * radius;
+      const angle = step * idx - Math.PI / 2;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  const spokes = filtered.map((concept, idx) => {
+    const angle = step * idx - Math.PI / 2;
+    const x = cx + radius * Math.cos(angle);
+    const y = cy + radius * Math.sin(angle);
+    return { label: concept.name, x, y };
+  });
+
+  return (
+    <div className="rounded-xl border border-neutral-800 bg-neutral-950/70 p-3">
+      <svg viewBox="0 0 240 240" className="w-full">
+        <circle
+          cx={cx}
+          cy={cy}
+          r={radius}
+          className="fill-neutral-900 stroke-neutral-800"
+        />
+        {[0.25, 0.5, 0.75, 1].map((pct) => (
+          <circle
+            key={pct}
+            cx={cx}
+            cy={cy}
+            r={radius * pct}
+            className="fill-none stroke-neutral-800"
+            strokeDasharray="4 4"
+          />
+        ))}
+        {spokes.map((spoke, idx) => (
+          <line
+            key={`spoke-${idx}`}
+            x1={cx}
+            y1={cy}
+            x2={spoke.x}
+            y2={spoke.y}
+            className="stroke-neutral-800"
+          />
+        ))}
+        {polygonPoints && (
+          <polygon
+            points={polygonPoints}
+            className="fill-indigo-500/20 stroke-indigo-400"
+            strokeWidth={2}
+          />
+        )}
+      </svg>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-neutral-300 md:grid-cols-3">
+        {filtered.map((concept, idx) => (
+          <div
+            key={`${concept.name}-${idx}`}
+            className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-950 px-2 py-2"
+          >
+            <span className="truncate pr-2" title={concept.name}>
+              {concept.name}
+            </span>
+            <span className="font-semibold text-indigo-300">
+              {clampRating(concept.rating)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const HIGHLIGHT_COLORS = [
   "#22d3ee",
   "#f472b6",
@@ -253,7 +363,11 @@ function normalizeHighlight(
   const labelSource =
     raw?.label || raw?.title || raw?.name || raw?.id || raw?.segment;
   const helpSource =
-    raw?.help_text || raw?.notes || raw?.description || raw?.detail || raw?.tooltip;
+    raw?.help_text ||
+    raw?.notes ||
+    raw?.description ||
+    raw?.detail ||
+    raw?.tooltip;
   return {
     label:
       typeof labelSource === "string" && labelSource.trim()
@@ -327,6 +441,32 @@ function parseAnnotatedImageBlock(raw: string): AnnotatedImageSpec | null {
   };
 }
 
+function buildAnnotatedImageFallback(asset: ImageAsset): string {
+  const payload = {
+    img_url: asset.img_url,
+    title: asset.title ?? "",
+    description: asset.description ?? "",
+    lecture: asset.lecture_key ?? "",
+    notes: asset.notes ?? "",
+    area_description: asset.area_description ?? [],
+  };
+  return [
+    "```annotated-image",
+    JSON.stringify(payload, null, 2),
+    "```",
+  ].join("\n");
+}
+
+function ensureAnswerHasImage(
+  answer: string | null | undefined,
+  asset?: ImageAsset | null
+): string {
+  const base = (answer ?? "(no answer)").toString();
+  if (!asset) return base;
+  if (base.includes("```annotated-image")) return base;
+  return `${base.trim()}\n\n${buildAnnotatedImageFallback(asset)}`;
+}
+
 function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
   const highlights = data.highlights || [];
@@ -349,7 +489,9 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
         {(data.lecture || data.description) && (
           <div className="text-sm text-neutral-300">
             {data.lecture && <span>{data.lecture}</span>}
-            {data.lecture && data.description && <span className="mx-1">•</span>}
+            {data.lecture && data.description && (
+              <span className="mx-1">•</span>
+            )}
             {data.description && <span>{data.description}</span>}
           </div>
         )}
@@ -366,7 +508,8 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
           const top = region.y * 100;
           const width = region.w * 100;
           const height = region.h * 100;
-          const color = region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length];
+          const color =
+            region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length];
           const fillColor = withAlpha(color);
           return (
             <button
@@ -386,7 +529,9 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
                 setActiveIdx((prev) => (prev === idx ? null : prev))
               }
               onFocus={() => setActiveIdx(idx)}
-              onBlur={() => setActiveIdx((prev) => (prev === idx ? null : prev))}
+              onBlur={() =>
+                setActiveIdx((prev) => (prev === idx ? null : prev))
+              }
               onClick={() => setActiveIdx(idx)}
             >
               <span className="sr-only">
@@ -408,7 +553,8 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
               className="rounded-xl border bg-black/80 px-3 py-2 text-xs text-white shadow-xl"
               style={{
                 borderColor:
-                  activeRegion.color || HIGHLIGHT_COLORS[activeIdx! % HIGHLIGHT_COLORS.length],
+                  activeRegion.color ||
+                  HIGHLIGHT_COLORS[activeIdx! % HIGHLIGHT_COLORS.length],
               }}
             >
               <div className="font-semibold">
@@ -424,9 +570,7 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
         )}
       </div>
       <div className="space-y-3 border-t border-indigo-500/20 px-4 py-3 text-sm text-neutral-200">
-        {data.notes && (
-          <p className="text-neutral-300">{data.notes}</p>
-        )}
+        {data.notes && <p className="text-neutral-300">{data.notes}</p>}
         {highlights.length > 0 && (
           <div>
             <div className="text-[11px] uppercase tracking-wide text-neutral-400">
@@ -439,7 +583,8 @@ function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
                     className="mt-1 h-2.5 w-2.5 rounded-full"
                     style={{
                       backgroundColor:
-                        region.color || HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length],
+                        region.color ||
+                        HIGHLIGHT_COLORS[idx % HIGHLIGHT_COLORS.length],
                     }}
                   />
                   <div>
@@ -694,8 +839,17 @@ function toCiteLinks(text: string, hits: Hit[]) {
     (a, b) => b[0].length - a[0].length
   );
   for (const [citation, id] of entries) {
-    const pattern = new RegExp(`\\[${escapeRegExp(citation)}\\]`, "g");
-    const replacement = `[${citation}](cite:${encodeURIComponent(id)})`;
+    const escaped = escapeRegExp(citation);
+    const escapedSub = escapeRegExp(citation.substring(1));
+
+    const pattern = new RegExp(
+      `\\[${escaped}\\]|${escaped}|${escapedSub}`,
+      "g"
+    );
+    const replacement = `[${citation
+      .replace("(", "")
+      .replace(")", "")}](cite:${encodeURIComponent(id)})`;
+
     rewritten = rewritten.replace(pattern, replacement);
   }
   return rewritten;
@@ -1258,10 +1412,30 @@ function LectureRef({
 
 // -----------------------------------
 
-export default function ChatPage() {
-  // sidebar state: chats in localStorage
+function ChatExperience({
+  user,
+  profile,
+  signOut,
+}: {
+  user: User;
+  profile: UserProfile;
+  signOut: () => Promise<void>;
+}) {
+  // sidebar state: chats stored in Supabase
   const [chats, setChats] = useState<Chat[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(
+    profile.active_chat_id
+  );
+  const [chatsLoading, setChatsLoading] = useState(true);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [profileDetails, setProfileDetails] = useState(profile);
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileContext, setProfileContext] = useState<string>(
+    profile.context || ""
+  );
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const hydratedRef = useRef(false);
   const activeChat = useMemo<Chat | null>(
     () => chats.find((c) => c.id === activeId) || null,
     [chats, activeId]
@@ -1272,10 +1446,9 @@ export default function ChatPage() {
   const [namerValue, setNamerValue] = useState("");
 
   // UI / query state
-  const [lectures, setLectures] = useState<LectureItem[]>([]);
-  const [selectedLecture, setSelectedLecture] = useState<string>("");
   const [diag, setDiag] = useState<any>({});
   const [q, setQ] = useState("");
+  const lastJobFetchRef = useRef<number | null>(null);
 
   // modal (source)
   const [popupSource, setPopupSource] = useState<{
@@ -1291,6 +1464,9 @@ export default function ChatPage() {
   // HUD
   const [phase, setPhase] = useState<Phase>("idle");
   const [jobId, setJobId] = useState<string | null>(null);
+  const [backgroundJobs, setBackgroundJobs] = useState<
+    Map<string, { chatId: string }>
+  >(() => new Map());
   const [loadingLineIdx, setLoadingLineIdx] = useState(0);
   const [statusLine, setStatusLine] = useState("");
   const [retryCount, setRetryCount] = useState(0);
@@ -1309,7 +1485,7 @@ export default function ChatPage() {
   const [quizOpen, setQuizOpen] = useState(false);
   const [quizStage, setQuizStage] = useState<QuizStage>("config");
   const [quizConfig, setQuizConfig] = useState<QuizConfig>({
-    lecture_key: "",
+    lecture_key: null,
     topic: "",
   });
   const [quizActiveConfig, setQuizActiveConfig] = useState<QuizConfig | null>(
@@ -1331,6 +1507,17 @@ export default function ChatPage() {
     null
   );
   const [quizSummaryVisible, setQuizSummaryVisible] = useState(false);
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState("");
+  const metadata = (user.user_metadata || {}) as Record<string, any>;
+  const avatarUrl = metadata.avatar_url || metadata.picture || null;
+
+  useEffect(() => {
+    setProfileDetails(profile);
+    setProfileContext(profile.context || "");
+  }, [profile]);
+  const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const quizTypeIndexRef = useRef(0);
   const quizTypes: QuizQuestionType[] = [
     "true_false",
@@ -1353,38 +1540,116 @@ export default function ChatPage() {
       ? 92
       : 100;
 
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const endOfMessagesRef = useRef<HTMLDivElement>(null);
+  const shouldPersistMessages = useCallback(() => {
+    if (!jobId) return true;
+    const lastFetch = lastJobFetchRef.current;
+    if (lastFetch === null) return false;
+    return Date.now() - lastFetch < 30_000;
+  }, [jobId]);
 
-  // load chats on mount
+  const persistChats = useCallback(
+    (nextChats: Chat[], ids: string[]) => {
+      ids.forEach((id) => {
+        const chat = nextChats.find((c) => c.id === id);
+        if (chat) {
+          void upsertUserChat(user.id, chat).catch((err) =>
+            console.error("Failed to save chat", err)
+          );
+        }
+      });
+    },
+    [user.id]
+  );
+
+  const applyChatUpdate = useCallback(
+    (updater: (prev: Chat[]) => Chat[], ids?: string[]) => {
+      setChats((prev) => {
+        const next = updater(prev);
+        if (ids?.length) persistChats(next, ids);
+        return next;
+      });
+    },
+    [persistChats]
+  );
+
+  const addBackgroundJob = useCallback((job: string, chatId: string) => {
+    setBackgroundJobs((prev) => {
+      const next = new Map(prev);
+      next.set(job, { chatId });
+      return next;
+    });
+  }, []);
+
+  const removeBackgroundJob = useCallback((job: string) => {
+    setBackgroundJobs((prev) => {
+      if (!prev.has(job)) return prev;
+      const next = new Map(prev);
+      next.delete(job);
+      return next;
+    });
+  }, []);
+
+  // load chats on mount from Supabase
   useEffect(() => {
-    const cs = loadChats();
-    let id = loadActiveChatId();
-    if (!cs.length) {
-      setNamerOpen(true); // first run → ask for a name
+    let cancelled = false;
+    setSyncError(null);
+    setChatsLoading(true);
+
+    fetchUserChats(user.id)
+      .then((cs) => {
+        if (cancelled) return;
+        setChats(cs);
+        const nextActive =
+          (profile.active_chat_id &&
+          cs.some((c) => c.id === profile.active_chat_id)
+            ? profile.active_chat_id
+            : cs[0]?.id) || null;
+        setActiveId(nextActive);
+        if (!cs.length) setNamerOpen(true);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to load chats", err);
+        setSyncError("Could not load chats from Supabase.");
+        setChats([]);
+        setActiveId(null);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          hydratedRef.current = true;
+          setChatsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user.id, profile.active_chat_id]);
+
+  // persist active chat selection
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    void updateActiveChatId(user.id, activeId).catch((err) =>
+      console.error("Failed to persist active chat", err)
+    );
+  }, [activeId, user.id]);
+
+  // track last fetch for background persistence decisions
+  useEffect(() => {
+    if (jobId) {
+      lastJobFetchRef.current = Date.now();
+    } else {
+      lastJobFetchRef.current = null;
     }
-    setChats(cs);
-    if (id && cs.some((c) => c.id === id)) setActiveId(id);
-  }, []);
-
-  // persist chats & active id
-  useEffect(() => {
-    saveChats(chats);
-  }, [chats]);
-  useEffect(() => {
-    if (activeId) saveActiveChatId(activeId);
-  }, [activeId]);
-
-  // fetch lectures on mount
-  useEffect(() => {
-    fetchLectures()
-      .then(setLectures)
-      .catch(() => setLectures([]));
-  }, []);
+  }, [jobId]);
 
   // autoscroll
+  const messageCount = activeChat?.messages?.length ?? 0;
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: 1e9, behavior: "smooth" });
-  }, [activeChat?.messages]);
+    if (!messageCount) return;
+    endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messageCount]);
 
   // HUD cycling
   useEffect(() => {
@@ -1405,8 +1670,7 @@ export default function ChatPage() {
     const name = namerValue.trim();
     if (!name) return;
     const c = createChat(name);
-    const next = [c, ...chats];
-    setChats(next);
+    applyChatUpdate((prev) => [c, ...prev], [c.id]);
     setActiveId(c.id);
     setNamerOpen(false);
   }
@@ -1423,27 +1687,56 @@ export default function ChatPage() {
       chats.find((c) => c.id === id)?.name || ""
     );
     if (!name) return;
-    setChats((prev) => renameChat(prev, id, name));
+    applyChatUpdate((prev) => renameChat(prev, id, name), [id]);
   }
   function doDeleteChat(id: string) {
     if (!confirm("Delete this chat?")) return;
     const next = deleteChat(chats, id);
     setChats(next);
+    void deleteUserChat(user.id, id).catch((err) =>
+      console.error("Failed to delete chat", err)
+    );
     if (activeId === id) setActiveId(next[0]?.id || null);
+  }
+
+  const closeProfileModal = () => {
+    setProfileModalOpen(false);
+    setProfileMessage(null);
+    setProfileContext(profileDetails.context || "");
+  };
+
+  async function saveProfileContext() {
+    setProfileSaving(true);
+    setProfileMessage(null);
+    try {
+      const updated = await updateUserContext(profile.id, profileContext.trim());
+      setProfileDetails(updated);
+      setProfileContext(updated.context || "");
+      setProfileMessage("Profile updated");
+    } catch (err) {
+      console.error("Failed to update profile context", err);
+      setProfileMessage("Could not save your profile. Please try again.");
+    } finally {
+      setProfileSaving(false);
+    }
   }
 
   // submit question
   const submit = async () => {
+    if (chatsLoading) return;
     if (!activeChat) {
       // force name prompt if no active chat exists
       actionNewChat();
       return;
     }
     const query = q.trim();
-    if (!query || phase !== "idle") return;
+    if (!query || (phase !== "idle" && phase !== "done")) return;
 
-    setChats((prev) =>
-      appendMessage(prev, activeChat.id, { role: "user", content: query })
+    const persistIds = shouldPersistMessages() ? [activeChat.id] : undefined;
+    applyChatUpdate(
+      (prev) =>
+        appendMessage(prev, activeChat.id, { role: "user", content: query }),
+      persistIds
     );
     setQ("");
     setPhase("sent");
@@ -1456,19 +1749,28 @@ export default function ChatPage() {
     setValidationModal(null);
     let jobStarted = false;
     try {
-      const opts: any = { use_global: true };
-      if (selectedLecture) opts.force_lecture_key = selectedLecture;
-      const { job_id } = await startQueryJob(query, opts);
+      const { job_id } = await startQueryJob(query, {
+        use_global: true,
+        user_id: user.id,
+        chat_id: activeChat.id,
+        chat_name: activeChat.name,
+        user_context: profileDetails.context?.trim() || undefined,
+      });
+      if (jobId && jobChatRef.current) {
+        addBackgroundJob(jobId, jobChatRef.current);
+      }
       jobChatRef.current = activeChat.id;
       setJobId(job_id);
       jobStarted = true;
     } catch (e: any) {
       setStatusLine("Encountered an error while generating answer.");
-      setChats((prev) =>
-        appendMessage(prev, activeChat.id, {
-          role: "assistant",
-          content: `Error: ${e?.message ?? "unknown error"}`,
-        })
+      applyChatUpdate(
+        (prev) =>
+          appendMessage(prev, activeChat.id, {
+            role: "assistant",
+            content: `Error: ${e?.message ?? "unknown error"}`,
+          }),
+        [activeChat.id]
       );
     } finally {
       if (!jobStarted) {
@@ -1491,8 +1793,8 @@ export default function ChatPage() {
     setQuizOpen(true);
     setQuizStage("config");
     setQuizConfig({
-      lecture_key: selectedLecture || "",
       topic: "",
+      lecture_key: null,
     });
     setQuizActiveConfig(null);
     setQuizQuestion(null);
@@ -1517,7 +1819,7 @@ export default function ChatPage() {
     }
     setQuizOpen(false);
     setQuizStage("config");
-    setQuizConfig({ lecture_key: "", topic: "" });
+    setQuizConfig({ lecture_key: null, topic: "" });
     setQuizActiveConfig(null);
     setQuizQuestion(null);
     setQuizContext("");
@@ -1539,14 +1841,10 @@ export default function ChatPage() {
     setQuizHintVisible(false);
     setQuizAnswer("");
     try {
-      const normalized: QuizConfig = {
-        lecture_key: (config.lecture_key || "").trim(),
-        topic: (config.topic || "").trim(),
-      };
+      const normalizedTopic = (config.topic || "").trim();
       const type = nextQuizType();
       const res = await requestQuizQuestion({
-        lecture_key: normalized.lecture_key || undefined,
-        topic: normalized.topic || undefined,
+        topic: normalizedTopic || undefined,
         question_type: type,
       });
       setQuizQuestion(res.question);
@@ -1555,8 +1853,8 @@ export default function ChatPage() {
       setQuizAnswer(res.question.question_type === "mcq_multi" ? [] : "");
       setQuizStage("question");
       setQuizActiveConfig({
-        lecture_key: res.lecture_key || normalized.lecture_key,
-        topic: res.topic || normalized.topic,
+        lecture_key: res.lecture_key || null,
+        topic: res.topic || normalizedTopic,
       });
     } catch (err: any) {
       setQuizError(err?.message ?? "Unable to generate quiz question");
@@ -1619,6 +1917,33 @@ export default function ChatPage() {
     setQuizHintVisible(true);
   };
 
+  const loadInsights = useCallback(async () => {
+    setInsightsLoading(true);
+    setInsightsError("");
+    try {
+      const data = await fetchInsights({
+        user_id: profile.id,
+        max_chats: 8,
+        max_messages_per_chat: 14,
+      });
+      setInsights(data);
+    } catch (err: any) {
+      setInsightsError(err?.message ?? "Unable to load insights");
+    } finally {
+      setInsightsLoading(false);
+    }
+  }, [profile.id]);
+
+  const handleOpenInsights = () => {
+    setInsightsOpen(true);
+    loadInsights();
+  };
+
+  const handleCloseInsights = () => {
+    setInsightsOpen(false);
+    setInsightsError("");
+  };
+
   const quizAnswerHasValue = Array.isArray(quizAnswer)
     ? quizAnswer.length > 0
     : quizAnswer.toString().trim().length > 0;
@@ -1639,9 +1964,19 @@ export default function ChatPage() {
   };
 
   useEffect(() => {
-    if (!jobId) return;
+    const entries = [
+      ...(jobId && jobChatRef.current
+        ? [{ jobId, chatId: jobChatRef.current, active: true }]
+        : []),
+      ...Array.from(backgroundJobs.entries()).map(([id, meta]) => ({
+        jobId: id,
+        chatId: meta.chatId,
+        active: false,
+      })),
+    ].filter((entry) => Boolean(entry.chatId));
+
+    if (!entries.length) return;
     let cancelled = false;
-    let handled = false;
 
     const phaseFromJob = (jobPhase: string): Phase => {
       switch (jobPhase) {
@@ -1662,100 +1997,147 @@ export default function ChatPage() {
       }
     };
 
-    const poll = async () => {
-      try {
-        const status = await fetchQueryJob(jobId);
-        if (cancelled) return;
-        setPhase(phaseFromJob(status.phase));
-        if (typeof status.retry_count === "number") {
-          setRetryCount(status.retry_count);
+    const handleCompletion = (
+      entry: { jobId: string; chatId: string; active: boolean },
+      status: QueryJobStatus
+    ) => {
+      const fact = status.fact_check as FactCheckResult | undefined;
+      const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
+      const mergedContent = ensureAnswerHasImage(
+        status.answer,
+        status.image_asset
+      );
+
+      if (entry.active) {
+        if (status.status === "failed" && !status.message) {
+          setStatusLine("AI response could not be validated after retries.");
         }
-        if (typeof status.max_attempts === "number") {
-          setMaxRetries(status.max_attempts);
+
+        const jobFailed =
+          status.status === "failed" || (fact?.status || "") === "failed";
+        if (jobFailed) {
+          setValidationModal({
+            hits: limitedHits,
+            details:
+              status.message?.trim() ||
+              fact?.message?.trim() ||
+              "AI response could not be validated after retries.",
+          });
         }
-        setStatusLine(status.message?.trim() || "");
-        const aiStatus =
-          status.fact_ai_status === "passed" ||
-          status.fact_ai_status === "failed"
-            ? status.fact_ai_status
-            : null;
-        const claimsStatus =
-          status.fact_claims_status === "passed" ||
-          status.fact_claims_status === "failed"
-            ? status.fact_claims_status
-            : null;
-        setFactAiStatus(aiStatus);
-        setFactClaimsStatus(claimsStatus);
+      }
 
-        if (
-          !handled &&
-          status.status !== "running" &&
-          status.status !== "queued"
-        ) {
-          handled = true;
-          const fact = status.fact_check as FactCheckResult | undefined;
-          const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
+      const persistIds = shouldPersistMessages() ? [entry.chatId] : undefined;
+      applyChatUpdate(
+        (prev) =>
+          appendMessage(prev, entry.chatId, {
+            role: "assistant",
+            content: mergedContent,
+            hits: limitedHits,
+            diagnostics: status.diagnostics || {},
+            fact_check: fact,
+          }),
+        persistIds
+      );
 
-          if (status.status === "failed" && !status.message) {
-            setStatusLine("AI response could not be validated after retries.");
-          }
-
-          const jobFailed =
-            status.status === "failed" || (fact?.status || "") === "failed";
-          if (jobFailed) {
-            setValidationModal({
-              hits: limitedHits,
-              details:
-                status.message?.trim() ||
-                fact?.message?.trim() ||
-                "AI response could not be validated after retries.",
-            });
-          }
-
-          const targetChatId = jobChatRef.current || activeChat?.id;
-          if (targetChatId) {
-            setChats((prev) =>
-              appendMessage(prev, targetChatId, {
-                role: "assistant",
-                content: status.answer || "(no answer)",
-                hits: limitedHits,
-                diagnostics: status.diagnostics || {},
-                fact_check: fact,
-              })
-            );
-          }
-          setDiag(status.diagnostics || {});
-          setPhase("done");
-          setJobId(null);
-          jobChatRef.current = null;
-          setTimeout(() => {
-            if (!cancelled) {
-              setPhase("idle");
-              setStatusLine("");
-            }
-          }, 600);
-        }
-      } catch (err: any) {
-        if (cancelled) return;
-        setStatusLine("Lost connection to validation job.");
+      if (entry.active) {
+        setDiag(status.diagnostics || {});
         setPhase("done");
         setJobId(null);
         jobChatRef.current = null;
         setTimeout(() => {
           if (!cancelled) {
             setPhase("idle");
+            setStatusLine("");
           }
         }, 600);
+      } else {
+        removeBackgroundJob(entry.jobId);
       }
     };
 
-    poll();
+    const pollJob = async (entry: {
+      jobId: string;
+      chatId: string;
+      active: boolean;
+    }) => {
+      try {
+        const status = await fetchQueryJob(entry.jobId);
+        if (cancelled) return;
+
+        lastJobFetchRef.current = Date.now();
+
+        if (entry.active) {
+          setPhase(phaseFromJob(status.phase));
+          if (typeof status.retry_count === "number") {
+            setRetryCount(status.retry_count);
+          }
+          if (typeof status.max_attempts === "number") {
+            setMaxRetries(status.max_attempts);
+          }
+          setStatusLine(status.message?.trim() || "");
+          const aiStatus =
+            status.fact_ai_status === "passed" ||
+            status.fact_ai_status === "failed"
+              ? status.fact_ai_status
+              : null;
+          const claimsStatus =
+            status.fact_claims_status === "passed" ||
+            status.fact_claims_status === "failed"
+              ? status.fact_claims_status
+              : null;
+          setFactAiStatus(aiStatus);
+          setFactClaimsStatus(claimsStatus);
+        }
+
+        if (status.status !== "running" && status.status !== "queued") {
+          handleCompletion(entry, status);
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        const fallbackMessage = "Lost connection to validation job.";
+        if (entry.active) {
+          setStatusLine(fallbackMessage);
+          setPhase("done");
+          setJobId(null);
+          jobChatRef.current = null;
+          setTimeout(() => {
+            if (!cancelled) {
+              setPhase("idle");
+            }
+          }, 600);
+        } else {
+          applyChatUpdate(
+            (prev) =>
+              appendMessage(prev, entry.chatId, {
+                role: "assistant",
+                content: fallbackMessage,
+              }),
+            [entry.chatId]
+          );
+          removeBackgroundJob(entry.jobId);
+        }
+      }
+    };
+
+    const poll = async () => {
+      await Promise.all(entries.map((entry) => pollJob(entry)));
+    };
+
+    void poll();
     const id = setInterval(poll, 900);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [jobId, activeChat?.id, setChats]);
+  }, [
+    jobId,
+    backgroundJobs,
+    activeChat?.id,
+    setChats,
+    applyChatUpdate,
+    removeBackgroundJob,
+    shouldPersistMessages,
+  ]);
 
   // open source
   async function openSourceByMeta(md: any) {
@@ -1855,9 +2237,33 @@ export default function ChatPage() {
   const messages = activeChat?.messages || [];
 
   return (
-    <div className="min-h-[100dvh] bg-neutral-950 text-neutral-100 relative flex">
+    <div className="min-h-[100dvh] bg-neutral-950 text-neutral-100 relative flex overflow-hidden">
       {/* Sidebar */}
       <aside className="w-64 border-r border-neutral-900 bg-neutral-950/80 backdrop-blur-sm p-3 hidden md:flex md:flex-col">
+        <div className="mb-4 text-xs text-neutral-400">
+          <div className="flex items-center gap-3">
+            <ProfileAvatar
+              avatarUrl={avatarUrl}
+              email={user.email}
+              name={profileDetails.display_name}
+              onClick={() => setProfileModalOpen(true)}
+            />
+            <div>
+              <div className="text-sm font-semibold text-neutral-200 truncate">
+                {profileDetails.display_name || user.email}
+              </div>
+              <div className="text-[11px] text-neutral-500 truncate">
+                {user.email}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={signOut}
+            className="mt-2 rounded-lg border border-neutral-800 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-900"
+          >
+            Sign out
+          </button>
+        </div>
         <button
           onClick={actionNewChat}
           className="w-full mb-3 rounded-lg bg-white text-black font-semibold py-2 hover:opacity-90"
@@ -1870,8 +2276,20 @@ export default function ChatPage() {
         >
           🎯 Quiz Me
         </button>
+        <button
+          onClick={handleOpenInsights}
+          className="w-full mb-4 rounded-lg border border-indigo-500 text-indigo-200 font-semibold py-2 hover:bg-indigo-500/10"
+        >
+          🧠 Insights
+        </button>
         <div className="text-xs text-neutral-400 mb-2">Chats</div>
         <div className="flex-1 overflow-auto space-y-1">
+          {chatsLoading && (
+            <div className="text-neutral-600 text-xs">Loading chats…</div>
+          )}
+          {syncError && (
+            <div className="text-rose-300 text-xs">{syncError}</div>
+          )}
           {chats.map((c) => (
             <div
               key={c.id}
@@ -1907,14 +2325,14 @@ export default function ChatPage() {
               </div>
             </div>
           ))}
-          {!chats.length && (
+          {!chats.length && !chatsLoading && (
             <div className="text-neutral-600 text-xs">No chats yet.</div>
           )}
         </div>
       </aside>
 
       {/* Main */}
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Header */}
         <header className="sticky top-0 z-10 border-b border-neutral-900 bg-neutral-950/70 backdrop-blur-md">
           <div className="mx-auto max-w-3xl px-4 py-3 flex items-center gap-3">
@@ -1922,7 +2340,14 @@ export default function ChatPage() {
             <div className="font-semibold truncate">
               {activeChat?.name || "ArcheoSensei"}
             </div>
-            <div className="ml-auto text-xs text-neutral-400">
+            <div className="ml-auto flex items-center gap-3 text-xs text-neutral-400">
+              <ProfileAvatar
+                avatarUrl={avatarUrl}
+                email={user.email}
+                name={profileDetails.display_name}
+                buttonClassName="hidden sm:flex"
+                onClick={() => setProfileModalOpen(true)}
+              />
               {detectedLecture ? (
                 <>
                   Detected lecture:{" "}
@@ -1938,35 +2363,123 @@ export default function ChatPage() {
         </header>
 
         {/* Chat thread */}
-        <div className="mx-auto max-w-3xl px-4">
-          <div
-            ref={scrollRef}
-            className="pt-6 pb-40 overflow-auto"
-            style={{ minHeight: "calc(100dvh - 160px)" }}
-          >
-            {!messages.length ? (
-              <EmptyState />
-            ) : (
-              <div className="space-y-5">
-                {messages.map((m, i) => (
-                  <ChatTurn key={i} msg={m} onOpenCitation={openCitation} />
-                ))}
-              </div>
-            )}
+        <div className="flex-1 overflow-hidden">
+          <div className="mx-auto flex h-full max-w-3xl px-4">
+            <div className="flex-1 overflow-y-auto pt-6 pb-40">
+              {!messages.length ? (
+                chatsLoading ? (
+                  <div className="text-center text-sm text-neutral-500 pt-10">
+                    Loading your chats…
+                  </div>
+                ) : (
+                  <EmptyState />
+                )
+              ) : (
+                <div className="space-y-5">
+                  {messages.map((m, i) => (
+                    <ChatTurn key={i} msg={m} onOpenCitation={openCitation} />
+                  ))}
+                </div>
+              )}
+              <div ref={endOfMessagesRef} />
+            </div>
           </div>
         </div>
 
         {/* Bottom composer */}
         <Composer
-          selectedLecture={selectedLecture}
-          setSelectedLecture={setSelectedLecture}
-          lectures={lectures}
           q={q}
           setQ={setQ}
           disabled={phase !== "idle" && phase !== "done"}
           onSubmit={submit}
         />
       </div>
+
+      {profileModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={closeProfileModal}
+        >
+          <div
+            className="w-full max-w-xl rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt={profileDetails.display_name || user.email}
+                    className="h-12 w-12 rounded-full object-cover"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <InitialAvatar
+                    email={user.email}
+                    name={profileDetails.display_name}
+                    className="h-12 w-12 text-lg"
+                  />
+                )}
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-neutral-500">
+                    Signed in as
+                  </div>
+                  <div className="text-lg font-semibold text-neutral-100">
+                    {profileDetails.display_name || user.email}
+                  </div>
+                  <div className="text-sm text-neutral-400">{user.email}</div>
+                </div>
+              </div>
+              <button
+                onClick={closeProfileModal}
+                className="rounded-full border border-neutral-700 px-3 py-1 text-sm text-neutral-300 hover:bg-neutral-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-neutral-200">
+                  Personal context
+                </label>
+                <span className="text-[11px] text-neutral-500">
+                  Used to personalize answers
+                </span>
+              </div>
+              <textarea
+                value={profileContext}
+                onChange={(e) => setProfileContext(e.target.value)}
+                placeholder="Add notes you want ArcheoSensei to remember (e.g., topics you're unsure about)."
+                className="min-h-[140px] w-full rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-neutral-700"
+              />
+              <div className="text-xs text-neutral-500">
+                We’ll include this context with every question so responses stay aligned with your needs.
+              </div>
+              {profileMessage && (
+                <div className="rounded-md border border-neutral-700 bg-neutral-800/60 px-3 py-2 text-xs text-neutral-200">
+                  {profileMessage}
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={closeProfileModal}
+                  className="rounded-lg border border-neutral-800 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800/60"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveProfileContext}
+                  disabled={profileSaving}
+                  className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-60"
+                >
+                  {profileSaving ? "Saving…" : "Save & use"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {quizOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
@@ -1977,8 +2490,8 @@ export default function ChatPage() {
                   Quiz Me
                 </h2>
                 <p className="text-sm text-neutral-400">
-                  Choose a lecture or enter a topic to generate a quick practice
-                  question.
+                  Enter a topic to generate a quick practice question. We’ll
+                  pull material from the most relevant lectures automatically.
                 </p>
               </div>
               <button
@@ -1993,31 +2506,7 @@ export default function ChatPage() {
               <div className="mt-6 space-y-5">
                 <div>
                   <label className="block text-sm font-medium text-neutral-300">
-                    Choose a lecture
-                  </label>
-                  <select
-                    className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-600"
-                    value={quizConfig.lecture_key}
-                    onChange={(e) =>
-                      setQuizConfig((prev) => ({
-                        ...prev,
-                        lecture_key: e.target.value,
-                      }))
-                    }
-                    onFocus={() => setQuizError("")}
-                  >
-                    <option value="">All lectures</option>
-                    {lectures.map((l) => (
-                      <option key={l.lecture_key} value={l.lecture_key}>
-                        {l.lecture_key} ({l.count})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-neutral-300">
-                    Or type any topic
+                    Topic
                   </label>
                   <input
                     value={quizConfig.topic}
@@ -2048,10 +2537,7 @@ export default function ChatPage() {
                   </button>
                   <button
                     onClick={() => generateQuiz(quizConfig)}
-                    disabled={
-                      (!quizConfig.lecture_key && !quizConfig.topic.trim()) ||
-                      quizQuestionLoading
-                    }
+                    disabled={!quizConfig.topic.trim() || quizQuestionLoading}
                     className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {quizQuestionLoading ? "Generating…" : "Quiz Me"}
@@ -2294,6 +2780,234 @@ export default function ChatPage() {
         </div>
       )}
 
+      {insightsOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+          <div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl">
+            <div className="flex flex-wrap items-start gap-3">
+              <div className="flex-1 min-w-[220px]">
+                <h2 className="text-2xl font-semibold text-neutral-100">
+                  My Insights
+                </h2>
+                <p className="text-sm text-neutral-400">
+                  Based on your latest chats and quizzes. Ratings are 0-100 for
+                  each concept.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={loadInsights}
+                  className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={handleCloseInsights}
+                  className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 text-xs text-neutral-300 sm:grid-cols-3">
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2">
+                <div className="text-neutral-500">Chats considered</div>
+                <div className="text-lg font-semibold text-neutral-100">
+                  {insights?.stats.chat_count ?? 0}
+                </div>
+              </div>
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2">
+                <div className="text-neutral-500">Messages analyzed</div>
+                <div className="text-lg font-semibold text-neutral-100">
+                  {insights?.stats.message_count ?? 0}
+                </div>
+              </div>
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2">
+                <div className="text-neutral-500">Quiz signals</div>
+                <div className="text-lg font-semibold text-neutral-100">
+                  {insights?.stats.quiz_signals ?? 0}
+                </div>
+              </div>
+            </div>
+
+            {insightsLoading ? (
+              <div className="mt-6 text-center text-sm text-neutral-400">
+                Synthesizing insights…
+              </div>
+            ) : insightsError ? (
+              <div className="mt-6 rounded-lg border border-red-500/60 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                {insightsError}
+              </div>
+            ) : insights ? (
+              <div className="mt-6 space-y-5">
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                      <div className="text-xs uppercase tracking-wide text-neutral-500">
+                        Summary
+                      </div>
+                      <div className="text-neutral-100">{insights.summary}</div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2 max-h-[280px] overflow-y-auto pr-2">
+                      <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                        <div className="text-xs uppercase tracking-wide text-emerald-300">
+                          Strengths
+                        </div>
+                        <ul className="mt-2 space-y-1 text-sm text-neutral-200">
+                          {insights.strengths.map((item, idx) => (
+                            <li key={`strength-${idx}`} className="flex gap-2">
+                              <span className="text-emerald-400">●</span>
+                              <span>{item}</span>
+                            </li>
+                          ))}
+                          {!insights.strengths.length && (
+                            <li className="text-neutral-500">
+                              No strengths detected yet.
+                            </li>
+                          )}
+                        </ul>
+                      </div>
+                      <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                        <div className="text-xs uppercase tracking-wide text-amber-300">
+                          Weaknesses
+                        </div>
+                        <ul className="mt-2 space-y-1 text-sm text-neutral-200">
+                          {insights.weaknesses.map((item, idx) => (
+                            <li key={`weak-${idx}`} className="flex gap-2">
+                              <span className="text-amber-400">●</span>
+                              <span>{item}</span>
+                            </li>
+                          ))}
+                          {!insights.weaknesses.length && (
+                            <li className="text-neutral-500">
+                              No weaknesses detected yet.
+                            </li>
+                          )}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                  <SkillRadar concepts={insights.concepts} />
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3 md:col-span-2">
+                    <div className="text-xs uppercase tracking-wide text-neutral-500">
+                      Per-concept ratings
+                    </div>
+                    <div className="mt-3 space-y-3 max-h-[340px] overflow-y-auto pr-2">
+                      {insights.concepts.length ? (
+                        insights.concepts.map((concept, idx) => (
+                          <div
+                            key={`${concept.name}-${idx}`}
+                            className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-3"
+                          >
+                            <div className="flex items-center gap-2 text-sm font-semibold text-neutral-100">
+                              <span
+                                className="flex-1 truncate"
+                                title={concept.name}
+                              >
+                                {concept.name}
+                              </span>
+                              <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs text-indigo-200">
+                                {clampRating(concept.rating)} / 100
+                              </span>
+                            </div>
+                            <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                              <div
+                                className="h-full rounded-full bg-indigo-500"
+                                style={{
+                                  width: `${clampRating(concept.rating)}%`,
+                                }}
+                              />
+                            </div>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                              <div>
+                                <div className="text-[11px] uppercase tracking-wide text-emerald-300">
+                                  Strengths
+                                </div>
+                                <ul className="mt-1 space-y-1 text-xs text-neutral-200">
+                                  {concept.strengths?.length ? (
+                                    concept.strengths.map((item, subIdx) => (
+                                      <li key={`c-s-${idx}-${subIdx}`}>
+                                        {item}
+                                      </li>
+                                    ))
+                                  ) : (
+                                    <li className="text-neutral-500">–</li>
+                                  )}
+                                </ul>
+                              </div>
+                              <div>
+                                <div className="text-[11px] uppercase tracking-wide text-amber-300">
+                                  Weaknesses
+                                </div>
+                                <ul className="mt-1 space-y-1 text-xs text-neutral-200">
+                                  {concept.weaknesses?.length ? (
+                                    concept.weaknesses.map((item, subIdx) => (
+                                      <li key={`c-w-${idx}-${subIdx}`}>
+                                        {item}
+                                      </li>
+                                    ))
+                                  ) : (
+                                    <li className="text-neutral-500">–</li>
+                                  )}
+                                </ul>
+                              </div>
+                            </div>
+                            {concept.actions?.length ? (
+                              <div className="mt-2">
+                                <div className="text-[11px] uppercase tracking-wide text-indigo-300">
+                                  Actions
+                                </div>
+                                <ul className="mt-1 space-y-1 text-xs text-neutral-200">
+                                  {concept.actions.map((action, subIdx) => (
+                                    <li key={`c-a-${idx}-${subIdx}`}>
+                                      {action}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : null}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-3 text-sm text-neutral-500">
+                          No concept-level ratings yet.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3 max-h-[300px] overflow-y-auto pr-2">
+                    <div className="text-xs uppercase tracking-wide text-indigo-300">
+                      Recommended next steps
+                    </div>
+                    <ul className="mt-2 space-y-2 text-sm text-neutral-200">
+                      {insights.recommendations.map((rec, idx) => (
+                        <li key={`rec-${idx}`} className="flex gap-2">
+                          <span className="text-indigo-300">●</span>
+                          <span>{rec}</span>
+                        </li>
+                      ))}
+                      {!insights.recommendations.length && (
+                        <li className="text-neutral-500">
+                          No recommendations available yet.
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-6 text-center text-sm text-neutral-500">
+                No insights yet. Try refreshing after you chat or quiz.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* HUD */}
       {phase !== "idle" && phase !== "done" && (
         <ProgressHUD
@@ -2491,7 +3205,7 @@ export default function ChatPage() {
       {/* Source modal */}
       {popupSource && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-neutral-900 rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden shadow-lg relative">
+          <div className="bg-neutral-900 rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-auto shadow-lg relative">
             <button
               className="absolute top-3 right-3 text-neutral-400 hover:text-white"
               onClick={() => setPopupSource(null)}
@@ -2499,11 +3213,11 @@ export default function ChatPage() {
               ✕
             </button>
             <div className="flex flex-col md:flex-row h-full">
-              <div className="flex-1 bg-black flex items-center justify-center">
+              <div className="flex-1 bg-black flex items-center justify-center overflow-auto">
                 <img
                   src={popupSource.image_url}
                   alt={`Slide ${popupSource.slide_no}`}
-                  className="object-contain max-h-[80vh]"
+                  className="object-contain max-h-[80vh] max-w-full"
                 />
               </div>
               <div className="w-full md:w-1/2 p-4 overflow-auto bg-neutral-950 border-l border-neutral-800">
@@ -2552,6 +3266,16 @@ export default function ChatPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <AuthGate>
+      {({ user, profile, signOut }) => (
+        <ChatExperience user={user} profile={profile} signOut={signOut} />
+      )}
+    </AuthGate>
   );
 }
 
@@ -2634,25 +3358,80 @@ function EmptyState() {
     <div className="mt-16 text-center text-neutral-400">
       <div className="text-2xl font-semibold mb-2">Ask your course</div>
       <div className="text-sm">
-        Name your chat in the sidebar → “New Chat”. It will auto-detect the
-        lecture unless you restrict it.
+        Name your chat in the sidebar → “New Chat”. ArcheoSensei will
+        automatically pull from every lecture it needs.
       </div>
     </div>
   );
 }
 
+function InitialAvatar({
+  email,
+  name,
+  className = "",
+}: {
+  email?: string | null;
+  name?: string | null;
+  className?: string;
+}) {
+  const labelSource = (name || email || "").trim();
+  const letter = labelSource ? labelSource[0] : "?";
+
+  return (
+    <div
+      className={`flex h-8 w-8 items-center justify-center rounded-full bg-neutral-800 text-sm font-semibold uppercase text-neutral-100 ${className}`}
+    >
+      {letter}
+    </div>
+  );
+}
+
+function ProfileAvatar({
+  avatarUrl,
+  email,
+  name,
+  onClick,
+  buttonClassName = "",
+  avatarClassName = "",
+}: {
+  avatarUrl?: string | null;
+  email?: string | null;
+  name?: string | null;
+  onClick?: () => void;
+  buttonClassName?: string;
+  avatarClassName?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group relative rounded-full border border-transparent p-0.5 hover:border-neutral-700 focus:outline-none focus:ring-2 focus:ring-neutral-700 ${buttonClassName}`}
+      title="View profile"
+    >
+      {avatarUrl ? (
+        <img
+          src={avatarUrl}
+          alt={name || email || "User avatar"}
+          className={`h-8 w-8 rounded-full object-cover ${avatarClassName}`}
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <InitialAvatar
+          email={email || undefined}
+          name={name || undefined}
+          className={avatarClassName}
+        />
+      )}
+    </button>
+  );
+}
+
 function Composer({
-  selectedLecture,
-  setSelectedLecture,
-  lectures,
   q,
   setQ,
   disabled,
   onSubmit,
 }: {
-  selectedLecture: string;
-  setSelectedLecture: (v: string) => void;
-  lectures: LectureItem[];
   q: string;
   setQ: (v: string) => void;
   disabled: boolean;
@@ -2660,21 +3439,8 @@ function Composer({
 }) {
   return (
     <div className="fixed inset-x-0 bottom-0 z-20 border-t border-neutral-900 bg-neutral-950/80 backdrop-blur-md">
-      <div className="mx-auto max-w-3xl px-4 py-3">
+      <div className="mx-auto max-w-3xl px-4 py-3 space-y-1">
         <div className="flex gap-2">
-          <select
-            className="w-44 shrink-0 rounded-xl border border-neutral-800 bg-neutral-900 text-neutral-200 px-3 py-2 text-sm"
-            value={selectedLecture}
-            onChange={(e) => setSelectedLecture(e.target.value)}
-          >
-            <option value="">All lectures</option>
-            {lectures.map((l) => (
-              <option key={l.lecture_key} value={l.lecture_key}>
-                {l.lecture_key} ({l.count})
-              </option>
-            ))}
-          </select>
-
           <input
             className="flex-1 rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-3
                        placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-700"
@@ -2694,10 +3460,8 @@ function Composer({
             Ask
           </button>
         </div>
-        <div className="text-[11px] text-neutral-500 mt-1">
-          {selectedLecture
-            ? `Restricted to ${selectedLecture}`
-            : "Auto-detecting lecture"}
+        <div className="text-[11px] text-neutral-500">
+          We’ll auto-detect the relevant lectures for every question.
         </div>
       </div>
     </div>
@@ -2776,7 +3540,6 @@ function ChatTurn({
           }}
           components={{
             a: ({ href, children, ...props }) => {
-              console.log("HREF: ", props, " | Citation: ", rewritten);
               if (href?.startsWith("cite:")) {
                 const payload = href.slice(5);
                 const id = decodeURIComponent(payload);
