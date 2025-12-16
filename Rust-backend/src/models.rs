@@ -101,10 +101,25 @@ pub struct RetrieveHit {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
+pub struct ImageAsset {
+    pub img_url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub notes: Option<String>,
+    pub lecture_key: Option<String>,
+    pub area_description: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct RetrieveResult {
     pub diagnostics: RetrieveDiagnostics,
     pub hits: Vec<RetrieveHit>,
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_asset: Option<ImageAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -273,6 +288,8 @@ pub struct QueryResponse {
     pub llm_usage: LlmUsage,
     pub answer: Option<String>,
     pub fact_check: FactCheckResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_asset: Option<ImageAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

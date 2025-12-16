@@ -42,6 +42,17 @@ export type QueryJobStatus = {
   llm?: any;
   fact_ai_status?: "passed" | "failed";
   fact_claims_status?: "passed" | "failed";
+  image_asset?: ImageAsset | null;
+};
+
+export type ImageAsset = {
+  img_url: string;
+  title?: string | null;
+  description?: string | null;
+  notes?: string | null;
+  lecture_key?: string | null;
+  area_description?: any;
+  similarity?: number | null;
 };
 
 export async function fetchQueryJob(jobId: string): Promise<QueryJobStatus> {

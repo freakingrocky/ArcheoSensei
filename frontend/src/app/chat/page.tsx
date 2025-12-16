@@ -23,6 +23,7 @@ import {
   fetchInsights,
   type InsightsResponse,
   type InsightConcept,
+  type ImageAsset,
 } from "@/lib/api";
 import {
   Chat,
@@ -434,6 +435,32 @@ function parseAnnotatedImageBlock(raw: string): AnnotatedImageSpec | null {
     notes: (data.notes || data.NOTES)?.toString(),
     highlights,
   };
+}
+
+function buildAnnotatedImageFallback(asset: ImageAsset): string {
+  const payload = {
+    img_url: asset.img_url,
+    title: asset.title ?? "",
+    description: asset.description ?? "",
+    lecture: asset.lecture_key ?? "",
+    notes: asset.notes ?? "",
+    area_description: asset.area_description ?? [],
+  };
+  return [
+    "```annotated-image",
+    JSON.stringify(payload, null, 2),
+    "```",
+  ].join("\n");
+}
+
+function ensureAnswerHasImage(
+  answer: string | null | undefined,
+  asset?: ImageAsset | null
+): string {
+  const base = (answer ?? "(no answer)").toString();
+  if (!asset) return base;
+  if (base.includes("```annotated-image")) return base;
+  return `${base.trim()}\n\n${buildAnnotatedImageFallback(asset)}`;
 }
 
 function AnnotatedImageBlock({ data }: { data: AnnotatedImageSpec }) {
@@ -1935,6 +1962,10 @@ function ChatExperience({
     ) => {
       const fact = status.fact_check as FactCheckResult | undefined;
       const limitedHits: Hit[] = (status.hits || []).slice(0, 3);
+      const mergedContent = ensureAnswerHasImage(
+        status.answer,
+        status.image_asset
+      );
 
       if (entry.active) {
         if (status.status === "failed" && !status.message) {
@@ -1959,7 +1990,7 @@ function ChatExperience({
         (prev) =>
           appendMessage(prev, entry.chatId, {
             role: "assistant",
-            content: status.answer || "(no answer)",
+            content: mergedContent,
             hits: limitedHits,
             diagnostics: status.diagnostics || {},
             fact_check: fact,

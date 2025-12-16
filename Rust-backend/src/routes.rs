@@ -21,7 +21,7 @@ use crate::{
     llm::{self, FactCheckOutput, build_learning_insights},
     models::{
         AsyncJobResponse, FactCheckResult, FactProgressCallback, FactProgressEvent, HealthResponse,
-        InsightStats, InsightsRequest, InsightsResponse, MemorizeRequest, QueryOptions,
+        ImageAsset, InsightStats, InsightsRequest, InsightsResponse, MemorizeRequest, QueryOptions,
         QueryRequest, QueryResponse, QuizGradeRequest, QuizGradeResponse, QuizQuestionRequest,
         QuizQuestionResponse, RetrieveDiagnostics, RetrieveHit, RetrieveResult,
     },
@@ -80,6 +80,35 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         db: db_ok,
         embedding_dim: state.embedder.dimension(),
     })
+}
+
+fn build_annotated_image_block(asset: &ImageAsset) -> Option<String> {
+    let payload = json!({
+        "img_url": asset.img_url,
+        "title": asset.title.clone().unwrap_or_default(),
+        "description": asset.description.clone().unwrap_or_default(),
+        "lecture": asset.lecture_key.clone().unwrap_or_default(),
+        "notes": asset.notes.clone().unwrap_or_default(),
+        "area_description": asset.area_description.clone(),
+    });
+    serde_json::to_string_pretty(&payload)
+        .ok()
+        .map(|body| format!("```annotated-image\n{}\n```", body))
+}
+
+fn answer_with_image_fallback(
+    answer: &Option<String>,
+    asset: Option<&ImageAsset>,
+) -> Option<String> {
+    let existing = answer.clone();
+    let Some(asset_block) = asset.and_then(build_annotated_image_block) else {
+        return existing;
+    };
+    match existing {
+        Some(text) if text.contains("```annotated-image") => Some(text),
+        Some(text) => Some(format!("{}\n\n{}", text.trim_end(), asset_block)),
+        None => Some(asset_block),
+    }
 }
 
 pub async fn upload_lectures(
@@ -209,7 +238,10 @@ pub async fn query(
         chat_name: None,
     });
     let RetrieveResult {
-        diagnostics, hits, ..
+        diagnostics,
+        hits,
+        image_asset,
+        ..
     } = retrieve::retrieve(
         &state.pool,
         &state.embedder,
@@ -219,7 +251,7 @@ pub async fn query(
         options.user_id.as_deref(),
     )
     .await?;
-    let context = retrieve::build_context(&hits);
+    let context = retrieve::build_context_with_image(&hits, image_asset.as_ref());
     let FactCheckOutput {
         answer,
         fact_check,
@@ -232,6 +264,7 @@ pub async fn query(
         None,
     )
     .await?;
+    let final_answer = answer_with_image_fallback(&answer, image_asset.as_ref());
     let response = QueryResponse {
         diagnostics,
         top_k: hits.len(),
@@ -240,8 +273,9 @@ pub async fn query(
         llm_model: llm.model.clone(),
         llm_latency_s: llm.latency_s,
         llm_usage: llm.usage.clone(),
-        answer,
+        answer: final_answer,
         fact_check,
+        image_asset,
     };
     Ok(Json(response))
 }
@@ -326,7 +360,8 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             return Ok(());
         }
     };
-    let context = retrieve::build_context(&retrieval.hits);
+    let context =
+        retrieve::build_context_with_image(&retrieval.hits, retrieval.image_asset.as_ref());
     state.jobs.update_job(
         &job_id,
         json!({
@@ -335,6 +370,7 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             "hits": serde_json::to_value(&retrieval.hits).unwrap_or(json!([])),
             "top_k": retrieval.hits.len(),
             "context_len": context.len(),
+            "image_asset": serde_json::to_value(&retrieval.image_asset).unwrap_or(json!(null)),
         }),
     );
     let jobs_for_progress = state.jobs.clone();
@@ -432,14 +468,16 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
             fact_check,
             llm,
         }) => {
+            let final_answer = answer_with_image_fallback(&answer, retrieval.image_asset.as_ref());
             state.jobs.update_job(
                 &job_id,
                 json!({
                     "status": "succeeded",
                     "phase": "done",
-                    "answer": answer,
+                    "answer": final_answer,
                     "fact_check": serde_json::to_value(&fact_check).unwrap_or(json!({})),
                     "llm": serde_json::to_value(llm).unwrap_or(json!({})),
+                    "image_asset": serde_json::to_value(&retrieval.image_asset).unwrap_or(json!(null)),
                 }),
             );
             if let Some(job) = state.jobs.get_job(&job_id) {
@@ -447,7 +485,7 @@ async fn process_query_job(state: AppState, job_id: String, payload: QueryReques
                     &state.pool,
                     &job,
                     &payload,
-                    &answer,
+                    &final_answer,
                     &retrieval.diagnostics,
                     &retrieval.hits,
                     &fact_check,
