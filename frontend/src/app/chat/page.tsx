@@ -20,6 +20,9 @@ import {
   QuizGradeResponse,
   QuizQuestionType,
   QueryJobStatus,
+  fetchInsights,
+  type InsightsResponse,
+  type InsightConcept,
 } from "@/lib/api";
 import {
   Chat,
@@ -198,6 +201,100 @@ const LOADING_LINES = [
   "Gathering thoughts…",
   "Just a second, truly a confounding question…",
 ];
+
+function clampRating(value?: number | null) {
+  if (!Number.isFinite(value || 0)) return 0;
+  return Math.max(0, Math.min(100, Number(value)));
+}
+
+function SkillRadar({ concepts }: { concepts: InsightConcept[] }) {
+  const filtered = concepts.filter((c) => c.name && Number.isFinite(c.rating));
+  if (!filtered.length) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-neutral-800 bg-neutral-950/70 px-4 py-8 text-sm text-neutral-400">
+        No concept ratings yet. Run a few chats or quizzes first.
+      </div>
+    );
+  }
+
+  const cx = 120;
+  const cy = 120;
+  const radius = 100;
+  const step = (Math.PI * 2) / filtered.length;
+
+  const polygonPoints = filtered
+    .map((concept, idx) => {
+      const pct = clampRating(concept.rating) / 100;
+      const r = pct * radius;
+      const angle = step * idx - Math.PI / 2;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  const spokes = filtered.map((concept, idx) => {
+    const angle = step * idx - Math.PI / 2;
+    const x = cx + radius * Math.cos(angle);
+    const y = cy + radius * Math.sin(angle);
+    return { label: concept.name, x, y };
+  });
+
+  return (
+    <div className="rounded-xl border border-neutral-800 bg-neutral-950/70 p-3">
+      <svg viewBox="0 0 240 240" className="w-full">
+        <circle
+          cx={cx}
+          cy={cy}
+          r={radius}
+          className="fill-neutral-900 stroke-neutral-800"
+        />
+        {[0.25, 0.5, 0.75, 1].map((pct) => (
+          <circle
+            key={pct}
+            cx={cx}
+            cy={cy}
+            r={radius * pct}
+            className="fill-none stroke-neutral-800"
+            strokeDasharray="4 4"
+          />
+        ))}
+        {spokes.map((spoke, idx) => (
+          <line
+            key={`spoke-${idx}`}
+            x1={cx}
+            y1={cy}
+            x2={spoke.x}
+            y2={spoke.y}
+            className="stroke-neutral-800"
+          />
+        ))}
+        {polygonPoints && (
+          <polygon
+            points={polygonPoints}
+            className="fill-indigo-500/20 stroke-indigo-400"
+            strokeWidth={2}
+          />
+        )}
+      </svg>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-neutral-300 md:grid-cols-3">
+        {filtered.map((concept, idx) => (
+          <div
+            key={`${concept.name}-${idx}`}
+            className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-950 px-2 py-2"
+          >
+            <span className="truncate pr-2" title={concept.name}>
+              {concept.name}
+            </span>
+            <span className="font-semibold text-indigo-300">
+              {clampRating(concept.rating)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 const HIGHLIGHT_COLORS = [
   "#22d3ee",
@@ -1372,6 +1469,10 @@ function ChatExperience({
     null
   );
   const [quizSummaryVisible, setQuizSummaryVisible] = useState(false);
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState("");
+  const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const quizTypeIndexRef = useRef(0);
   const quizTypes: QuizQuestionType[] = [
     "true_false",
@@ -1456,7 +1557,7 @@ function ChatExperience({
         setChats(cs);
         const nextActive =
           (profile.active_chat_id &&
-            cs.some((c) => c.id === profile.active_chat_id)
+          cs.some((c) => c.id === profile.active_chat_id)
             ? profile.active_chat_id
             : cs[0]?.id) || null;
         setActiveId(nextActive);
@@ -1566,7 +1667,8 @@ function ChatExperience({
 
     const persistIds = shouldPersistMessages() ? [activeChat.id] : undefined;
     applyChatUpdate(
-      (prev) => appendMessage(prev, activeChat.id, { role: "user", content: query }),
+      (prev) =>
+        appendMessage(prev, activeChat.id, { role: "user", content: query }),
       persistIds
     );
     setQ("");
@@ -1745,6 +1847,33 @@ function ChatExperience({
 
   const handleQuizHint = () => {
     setQuizHintVisible(true);
+  };
+
+  const loadInsights = useCallback(async () => {
+    setInsightsLoading(true);
+    setInsightsError("");
+    try {
+      const data = await fetchInsights({
+        user_id: profile.id,
+        max_chats: 8,
+        max_messages_per_chat: 14,
+      });
+      setInsights(data);
+    } catch (err: any) {
+      setInsightsError(err?.message ?? "Unable to load insights");
+    } finally {
+      setInsightsLoading(false);
+    }
+  }, [profile.id]);
+
+  const handleOpenInsights = () => {
+    setInsightsOpen(true);
+    loadInsights();
+  };
+
+  const handleCloseInsights = () => {
+    setInsightsOpen(false);
+    setInsightsError("");
   };
 
   const quizAnswerHasValue = Array.isArray(quizAnswer)
@@ -2046,7 +2175,9 @@ function ChatExperience({
               <div className="text-sm font-semibold text-neutral-200 truncate">
                 {profile.display_name || user.email}
               </div>
-              <div className="text-[11px] text-neutral-500 truncate">{user.email}</div>
+              <div className="text-[11px] text-neutral-500 truncate">
+                {user.email}
+              </div>
             </div>
           </div>
           <button
@@ -2067,6 +2198,12 @@ function ChatExperience({
           className="w-full mb-4 rounded-lg border border-neutral-800 text-neutral-200 font-semibold py-2 hover:bg-neutral-900"
         >
           🎯 Quiz Me
+        </button>
+        <button
+          onClick={handleOpenInsights}
+          className="w-full mb-4 rounded-lg border border-indigo-500 text-indigo-200 font-semibold py-2 hover:bg-indigo-500/10"
+        >
+          🧠 Insights
         </button>
         <div className="text-xs text-neutral-400 mb-2">Chats</div>
         <div className="flex-1 overflow-auto space-y-1">
@@ -2473,6 +2610,234 @@ function ChatExperience({
                     Ready for your next question?
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {insightsOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+          <div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl">
+            <div className="flex flex-wrap items-start gap-3">
+              <div className="flex-1 min-w-[220px]">
+                <h2 className="text-2xl font-semibold text-neutral-100">
+                  My Insights
+                </h2>
+                <p className="text-sm text-neutral-400">
+                  Based on your latest chats and quizzes. Ratings are 0-100 for
+                  each concept.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={loadInsights}
+                  className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={handleCloseInsights}
+                  className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 text-xs text-neutral-300 sm:grid-cols-3">
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2">
+                <div className="text-neutral-500">Chats considered</div>
+                <div className="text-lg font-semibold text-neutral-100">
+                  {insights?.stats.chat_count ?? 0}
+                </div>
+              </div>
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2">
+                <div className="text-neutral-500">Messages analyzed</div>
+                <div className="text-lg font-semibold text-neutral-100">
+                  {insights?.stats.message_count ?? 0}
+                </div>
+              </div>
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2">
+                <div className="text-neutral-500">Quiz signals</div>
+                <div className="text-lg font-semibold text-neutral-100">
+                  {insights?.stats.quiz_signals ?? 0}
+                </div>
+              </div>
+            </div>
+
+            {insightsLoading ? (
+              <div className="mt-6 text-center text-sm text-neutral-400">
+                Synthesizing insights…
+              </div>
+            ) : insightsError ? (
+              <div className="mt-6 rounded-lg border border-red-500/60 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                {insightsError}
+              </div>
+            ) : insights ? (
+              <div className="mt-6 space-y-5">
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                      <div className="text-xs uppercase tracking-wide text-neutral-500">
+                        Summary
+                      </div>
+                      <div className="text-neutral-100">{insights.summary}</div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2 max-h-[280px] overflow-y-auto pr-2">
+                      <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                        <div className="text-xs uppercase tracking-wide text-emerald-300">
+                          Strengths
+                        </div>
+                        <ul className="mt-2 space-y-1 text-sm text-neutral-200">
+                          {insights.strengths.map((item, idx) => (
+                            <li key={`strength-${idx}`} className="flex gap-2">
+                              <span className="text-emerald-400">●</span>
+                              <span>{item}</span>
+                            </li>
+                          ))}
+                          {!insights.strengths.length && (
+                            <li className="text-neutral-500">
+                              No strengths detected yet.
+                            </li>
+                          )}
+                        </ul>
+                      </div>
+                      <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                        <div className="text-xs uppercase tracking-wide text-amber-300">
+                          Weaknesses
+                        </div>
+                        <ul className="mt-2 space-y-1 text-sm text-neutral-200">
+                          {insights.weaknesses.map((item, idx) => (
+                            <li key={`weak-${idx}`} className="flex gap-2">
+                              <span className="text-amber-400">●</span>
+                              <span>{item}</span>
+                            </li>
+                          ))}
+                          {!insights.weaknesses.length && (
+                            <li className="text-neutral-500">
+                              No weaknesses detected yet.
+                            </li>
+                          )}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                  <SkillRadar concepts={insights.concepts} />
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3 md:col-span-2">
+                    <div className="text-xs uppercase tracking-wide text-neutral-500">
+                      Per-concept ratings
+                    </div>
+                    <div className="mt-3 space-y-3 max-h-[340px] overflow-y-auto pr-2">
+                      {insights.concepts.length ? (
+                        insights.concepts.map((concept, idx) => (
+                          <div
+                            key={`${concept.name}-${idx}`}
+                            className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-3"
+                          >
+                            <div className="flex items-center gap-2 text-sm font-semibold text-neutral-100">
+                              <span
+                                className="flex-1 truncate"
+                                title={concept.name}
+                              >
+                                {concept.name}
+                              </span>
+                              <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs text-indigo-200">
+                                {clampRating(concept.rating)} / 100
+                              </span>
+                            </div>
+                            <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                              <div
+                                className="h-full rounded-full bg-indigo-500"
+                                style={{
+                                  width: `${clampRating(concept.rating)}%`,
+                                }}
+                              />
+                            </div>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                              <div>
+                                <div className="text-[11px] uppercase tracking-wide text-emerald-300">
+                                  Strengths
+                                </div>
+                                <ul className="mt-1 space-y-1 text-xs text-neutral-200">
+                                  {concept.strengths?.length ? (
+                                    concept.strengths.map((item, subIdx) => (
+                                      <li key={`c-s-${idx}-${subIdx}`}>
+                                        {item}
+                                      </li>
+                                    ))
+                                  ) : (
+                                    <li className="text-neutral-500">–</li>
+                                  )}
+                                </ul>
+                              </div>
+                              <div>
+                                <div className="text-[11px] uppercase tracking-wide text-amber-300">
+                                  Weaknesses
+                                </div>
+                                <ul className="mt-1 space-y-1 text-xs text-neutral-200">
+                                  {concept.weaknesses?.length ? (
+                                    concept.weaknesses.map((item, subIdx) => (
+                                      <li key={`c-w-${idx}-${subIdx}`}>
+                                        {item}
+                                      </li>
+                                    ))
+                                  ) : (
+                                    <li className="text-neutral-500">–</li>
+                                  )}
+                                </ul>
+                              </div>
+                            </div>
+                            {concept.actions?.length ? (
+                              <div className="mt-2">
+                                <div className="text-[11px] uppercase tracking-wide text-indigo-300">
+                                  Actions
+                                </div>
+                                <ul className="mt-1 space-y-1 text-xs text-neutral-200">
+                                  {concept.actions.map((action, subIdx) => (
+                                    <li key={`c-a-${idx}-${subIdx}`}>
+                                      {action}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : null}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-3 text-sm text-neutral-500">
+                          No concept-level ratings yet.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3 max-h-[300px] overflow-y-auto pr-2">
+                    <div className="text-xs uppercase tracking-wide text-indigo-300">
+                      Recommended next steps
+                    </div>
+                    <ul className="mt-2 space-y-2 text-sm text-neutral-200">
+                      {insights.recommendations.map((rec, idx) => (
+                        <li key={`rec-${idx}`} className="flex gap-2">
+                          <span className="text-indigo-300">●</span>
+                          <span>{rec}</span>
+                        </li>
+                      ))}
+                      {!insights.recommendations.length && (
+                        <li className="text-neutral-500">
+                          No recommendations available yet.
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-6 text-center text-sm text-neutral-500">
+                No insights yet. Try refreshing after you chat or quiz.
               </div>
             )}
           </div>

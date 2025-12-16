@@ -12,8 +12,8 @@ use crate::{
     embedder::SentenceEmbedder,
     models::{
         ClaimCheckClaim, ClaimCheckResult, FactAiCheck, FactCheckAttempt, FactCheckResult,
-        FactProgressCallback, FactProgressEvent, LlmInfo, LlmUsage, QuizGradeResponse,
-        QuizQuestion,
+        FactProgressCallback, FactProgressEvent, InsightsPayload, LlmInfo, LlmUsage,
+        QuizGradeResponse, QuizQuestion,
     },
 };
 
@@ -1212,4 +1212,48 @@ pub async fn grade_quiz_answer(
     let payload = json_from_response(&raw)?;
     let grade = serde_json::from_value(payload)?;
     Ok(grade)
+}
+
+pub async fn build_learning_insights(
+    settings: &Settings,
+    transcript: &str,
+) -> Result<(InsightsPayload, LlmInfo)> {
+    let safe_transcript = transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if safe_transcript.is_empty() {
+        return Ok((
+            InsightsPayload {
+                summary: "I could not find any learning interactions yet. Start a chat or quiz and I will synthesize insights here.".to_string(),
+                ..Default::default()
+            },
+            LlmInfo::default(),
+        ));
+    }
+
+    let system = "You are a futuristic mentor distilling a learner's interactions into concise insights. Respond in terse JSON for UI consumption.";
+    let user_prompt = format!(
+        "Based on all my learning interactions, what are my insights, what are my strengths, what are my weaknesses, any general comments.\n\nLearning interactions (latest first):\n{}\n\nReturn valid JSON with keys: summary (2 sentences), strengths (array of 3-5 bullets), weaknesses (array of 3-5 bullets), recommendations (array of 3-6 specific actions), concepts (array of at least 5 objects with name, rating (0-100), strengths (array), weaknesses (array), actions (array)). Avoid markdown and avoid code fences.",
+        safe_transcript
+    );
+
+    let messages = vec![
+        json!({"role": "system", "content": system}),
+        json!({"role": "user", "content": user_prompt}),
+    ];
+
+    let (content, llm) = call_sig_gpt5(settings, &messages).await?;
+    let parsed = json_from_response(&content)
+        .ok()
+        .and_then(|value| serde_json::from_value::<InsightsPayload>(value).ok())
+        .unwrap_or_else(|| InsightsPayload {
+            summary: content.trim().to_string(),
+            ..Default::default()
+        });
+
+    Ok((parsed, llm))
 }

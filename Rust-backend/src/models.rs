@@ -26,6 +26,57 @@ pub struct MemorizeRequest {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct InsightsRequest {
+    pub user_id: String,
+    pub max_chats: Option<usize>,
+    pub max_messages_per_chat: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct InsightConcept {
+    pub name: String,
+    pub rating: u8,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strengths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub weaknesses: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct InsightsPayload {
+    pub summary: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strengths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub weaknesses: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recommendations: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub concepts: Vec<InsightConcept>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct InsightStats {
+    pub chat_count: usize,
+    pub message_count: usize,
+    pub quiz_signals: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(default)]
+pub struct InsightsResponse {
+    #[serde(flatten)]
+    pub payload: InsightsPayload,
+    pub llm: LlmInfo,
+    pub stats: InsightStats,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RetrieveDiagnostics {
