@@ -2196,7 +2196,7 @@ function ChatExperience({
   const messages = activeChat?.messages || [];
 
   return (
-    <div className="min-h-[100dvh] bg-neutral-950 text-neutral-100 relative flex">
+    <div className="min-h-[100dvh] bg-neutral-950 text-neutral-100 relative flex overflow-hidden">
       {/* Sidebar */}
       <aside className="w-64 border-r border-neutral-900 bg-neutral-950/80 backdrop-blur-sm p-3 hidden md:flex md:flex-col">
         <div className="mb-4 text-xs text-neutral-400">
@@ -2286,7 +2286,7 @@ function ChatExperience({
       </aside>
 
       {/* Main */}
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Header */}
         <header className="sticky top-0 z-10 border-b border-neutral-900 bg-neutral-950/70 backdrop-blur-md">
           <div className="mx-auto max-w-3xl px-4 py-3 flex items-center gap-3">
@@ -2315,27 +2315,26 @@ function ChatExperience({
         </header>
 
         {/* Chat thread */}
-        <div className="mx-auto max-w-3xl px-4">
-          <div
-            className="pt-6 pb-40 overflow-auto"
-            style={{ minHeight: "calc(100dvh - 160px)" }}
-          >
-            {!messages.length ? (
-              chatsLoading ? (
-                <div className="text-center text-sm text-neutral-500 pt-10">
-                  Loading your chats…
-                </div>
+        <div className="flex-1 overflow-hidden">
+          <div className="mx-auto flex h-full max-w-3xl px-4">
+            <div className="flex-1 overflow-y-auto pt-6 pb-40">
+              {!messages.length ? (
+                chatsLoading ? (
+                  <div className="text-center text-sm text-neutral-500 pt-10">
+                    Loading your chats…
+                  </div>
+                ) : (
+                  <EmptyState />
+                )
               ) : (
-                <EmptyState />
-              )
-            ) : (
-              <div className="space-y-5">
-                {messages.map((m, i) => (
-                  <ChatTurn key={i} msg={m} onOpenCitation={openCitation} />
-                ))}
-              </div>
-            )}
-            <div ref={endOfMessagesRef} />
+                <div className="space-y-5">
+                  {messages.map((m, i) => (
+                    <ChatTurn key={i} msg={m} onOpenCitation={openCitation} />
+                  ))}
+                </div>
+              )}
+              <div ref={endOfMessagesRef} />
+            </div>
           </div>
         </div>
 
@@ -3072,7 +3071,7 @@ function ChatExperience({
       {/* Source modal */}
       {popupSource && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-neutral-900 rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden shadow-lg relative">
+          <div className="bg-neutral-900 rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-auto shadow-lg relative">
             <button
               className="absolute top-3 right-3 text-neutral-400 hover:text-white"
               onClick={() => setPopupSource(null)}
@@ -3080,11 +3079,11 @@ function ChatExperience({
               ✕
             </button>
             <div className="flex flex-col md:flex-row h-full">
-              <div className="flex-1 bg-black flex items-center justify-center">
+              <div className="flex-1 bg-black flex items-center justify-center overflow-auto">
                 <img
                   src={popupSource.image_url}
                   alt={`Slide ${popupSource.slide_no}`}
-                  className="object-contain max-h-[80vh]"
+                  className="object-contain max-h-[80vh] max-w-full"
                 />
               </div>
               <div className="w-full md:w-1/2 p-4 overflow-auto bg-neutral-950 border-l border-neutral-800">
