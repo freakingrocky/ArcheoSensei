@@ -242,7 +242,12 @@ function SkillRadar({ concepts }: { concepts: InsightConcept[] }) {
   return (
     <div className="rounded-xl border border-neutral-800 bg-neutral-950/70 p-3">
       <svg viewBox="0 0 240 240" className="w-full">
-        <circle cx={cx} cy={cy} r={radius} className="fill-neutral-900 stroke-neutral-800" />
+        <circle
+          cx={cx}
+          cy={cy}
+          r={radius}
+          className="fill-neutral-900 stroke-neutral-800"
+        />
         {[0.25, 0.5, 0.75, 1].map((pct) => (
           <circle
             key={pct}
@@ -1531,7 +1536,7 @@ function ChatExperience({
         setChats(cs);
         const nextActive =
           (profile.active_chat_id &&
-            cs.some((c) => c.id === profile.active_chat_id)
+          cs.some((c) => c.id === profile.active_chat_id)
             ? profile.active_chat_id
             : cs[0]?.id) || null;
         setActiveId(nextActive);
@@ -1641,7 +1646,8 @@ function ChatExperience({
 
     const persistIds = shouldPersistMessages() ? [activeChat.id] : undefined;
     applyChatUpdate(
-      (prev) => appendMessage(prev, activeChat.id, { role: "user", content: query }),
+      (prev) =>
+        appendMessage(prev, activeChat.id, { role: "user", content: query }),
       persistIds
     );
     setQ("");
@@ -2541,7 +2547,7 @@ function ChatExperience({
 
       {insightsOpen && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
-          <div className="w-full max-w-4xl rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl">
+          <div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl">
             <div className="flex flex-wrap items-start gap-3">
               <div className="flex-1 min-w-[220px]">
                 <h2 className="text-2xl font-semibold text-neutral-100">
@@ -2607,7 +2613,7 @@ function ChatExperience({
                       </div>
                       <div className="text-neutral-100">{insights.summary}</div>
                     </div>
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-3 sm:grid-cols-2 max-h-[280px] overflow-y-auto pr-2">
                       <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
                         <div className="text-xs uppercase tracking-wide text-emerald-300">
                           Strengths
@@ -2654,7 +2660,7 @@ function ChatExperience({
                     <div className="text-xs uppercase tracking-wide text-neutral-500">
                       Per-concept ratings
                     </div>
-                    <div className="mt-3 space-y-3 max-h-[420px] overflow-y-auto pr-2">
+                    <div className="mt-3 space-y-3 max-h-[340px] overflow-y-auto pr-2">
                       {insights.concepts.length ? (
                         insights.concepts.map((concept, idx) => (
                           <div
@@ -2738,7 +2744,7 @@ function ChatExperience({
                     </div>
                   </div>
 
-                  <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                  <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3 max-h-[300px] overflow-y-auto pr-2">
                     <div className="text-xs uppercase tracking-wide text-indigo-300">
                       Recommended next steps
                     </div>
